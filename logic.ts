@@ -894,6 +894,46 @@ export function parseComebacks(html: string): Comeback[] {
   return out
 }
 
+// Допис бота про зміну стану: «🔴 06:53 Світло зникло …» чи «🟢 10:10 Світло з'явилося … Його не було 3год 17хв».
+export type StatusPost = { at: number; status: "on" | "off"; since: number; offMin: number | null }
+
+// Власний канал працює одразу, без модерації СвітлоБота: стан беремо з його дописів на t.me/s/канал.
+// Час зміни — з тексту (за Києвом), бо бот пише допис на кілька хвилин пізніше; дата — з часу допису.
+export function parseStatusPosts(html: string): StatusPost[] {
+  const out: StatusPost[] = []
+  const re = /tgme_widget_message_text[^>]*>([\s\S]*?)<\/div>[\s\S]*?<time datetime="([^"]+)"/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(html))) {
+    const text = plainText(m[1])
+    const s = /(\d{1,2}):(\d{2})\s*Світло (зникло|з.явилося)/.exec(text)
+    const at = Date.parse(m[2])
+    if (!s || !Number.isFinite(at)) continue
+    const on = s[3] !== "зникло"
+    let back = kyivParts(new Date(at)).min - (Number(s[1]) * 60 + Number(s[2]))
+    if (back < 0) back += 1440 // зміна до півночі, допис після
+    const gone = on ? /не було\s*([0-9\sдгохв]+)/.exec(text) : null
+    out.push({ at, status: on ? "on" : "off", since: Math.floor(at / 60000) * 60000 - back * 60000, offMin: gone ? durationMin(gone[1]) : null })
+  }
+  return out
+}
+
+// Факт власного каналу з останнього допису про зміну стану. «Скільки не було» бот пише сам;
+// якщо ні, рахуємо від попереднього допису «зникло». Дописів про світло немає: null.
+export function postsFact(posts: StatusPost[], id: string, name: string, nowMs: number): Fact | null {
+  if (!posts.length) return null
+  const sorted = posts.slice().sort((a, b) => a.since - b.since)
+  const last = sorted[sorted.length - 1]
+  let lastOffMin: number | null = null
+  if (last.status === "on") {
+    const before = sorted.filter((p) => p.status === "off" && p.since < last.since).pop()
+    lastOffMin = last.offMin !== null ? last.offMin : before ? Math.round((last.since - before.since) / 60000) : null
+  }
+  return {
+    channel: id, name, status: last.status, since: last.since, lastOffMin, lastOffEnd: lastOffMin !== null ? last.since : null,
+    postsFor: last.since, checkedAt: nowMs,
+  }
+}
+
 export type Fact = {
   channel: string
   name: string
@@ -981,7 +1021,14 @@ export function factView(fact: Fact | null | undefined, now: Now, nowMs: number)
   const old = nowMs - fact.checkedAt > SETTINGS.factStaleMinutes * 60000
   const checked = old ? `дані ${sinceText(fact.checkedAt, now)}` : null
   if (fact.status === "missing") {
-    return { kind: "missing", full: "Датчик не знайдено в СвітлоБоті", line: "Датчик не знайдено", short: "датчик ?", timerFrom: null, checked }
+    return {
+      kind: "missing",
+      full: "Немає даних від датчика: канал ще не писав про світло або назву введено з помилкою",
+      line: "Немає даних від датчика",
+      short: "датчик ?",
+      timerFrom: null,
+      checked,
+    }
   }
   const when = fact.since !== null ? sinceText(fact.since, now) : null
   // Для черги в налаштуваннях видно, за скількома датчиками.

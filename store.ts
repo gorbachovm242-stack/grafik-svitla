@@ -1,8 +1,8 @@
 // Налаштування, кеш графіка й завантаження з мережі. Сховище спільне для застосунку, віджета й кнопки «↻».
 import type { Channel, Config, Data, Fact, Now, Sched, Region } from "./logic"
 import {
-  SETTINGS, SVITLOBOT, channelId, fetchSchedule, findChannel, groupsFor, mergeFact, needsPosts, parseChannels, parseComebacks,
-  queueFact, queueId, withComeback,
+  SETTINGS, SVITLOBOT, channelId, fetchSchedule, findChannel, groupsFor, mergeFact, parseChannels, parseStatusPosts, postsFact,
+  queueFact, queueId,
 } from "./logic"
 
 const CONFIG_KEY = "config"
@@ -73,30 +73,39 @@ export async function getFact(cfg: Config | null, force: boolean): Promise<Fact 
   const same = saved && saved.channel.toLowerCase() === id.toLowerCase() ? saved : null
   const nowMs = Date.now()
   if (!force && same && nowMs - same.checkedAt < SETTINGS.factCacheMinutes * 60000) return same
+  if (own) return ownFact(cfg, own, same, nowMs)
   // У черзі датчиків не було: перепитуємо раз на годину, а не за кожним оновленням віджета.
   const none = Storage.get<{ id: string; checkedAt: number }>(NONE_KEY)
   if (!force && !same && none && none.id === id && nowMs - none.checkedAt < 60 * 60000) return null
   try {
-    const list = parseChannels(await loadText(SVITLOBOT.list))
-    if (!own) {
-      const queue = queueFact(same, list, cfg.region, cfg.group, nowMs)
-      if (queue) {
-        Storage.set(FACT_KEY, queue)
-        Storage.remove(NONE_KEY)
-      } else {
-        Storage.remove(FACT_KEY)
-        Storage.set(NONE_KEY, { id, checkedAt: nowMs })
-      }
-      return queue
+    const queue = queueFact(same, parseChannels(await loadText(SVITLOBOT.list)), cfg.region, cfg.group, nowMs)
+    if (queue) {
+      Storage.set(FACT_KEY, queue)
+      Storage.remove(NONE_KEY)
+    } else {
+      Storage.remove(FACT_KEY)
+      Storage.set(NONE_KEY, { id, checkedAt: nowMs })
     }
-    let fact = mergeFact(same, findChannel(list, id), id, nowMs)
-    if (needsPosts(fact)) {
-      try {
-        fact = withComeback(fact, parseComebacks(await loadText(SVITLOBOT.posts(fact.channel))))
-      } catch (e) {
-        // сторінка каналу недоступна: спробуємо наступного разу
-      }
+    return queue
+  } catch (e) {
+    return same
+  }
+}
+
+// Власний канал: спершу його дописи в Telegram (працює одразу, без модерації СвітлоБота й з точною тривалістю),
+// а якщо дописів про світло немає чи сторінка недоступна, то список СвітлоБота.
+async function ownFact(cfg: Config, id: string, same: Fact | null, nowMs: number): Promise<Fact | null> {
+  try {
+    const fromPosts = postsFact(parseStatusPosts(await loadText(SVITLOBOT.posts(id))), id, cfg.svitlobotName || id, nowMs)
+    if (fromPosts) {
+      Storage.set(FACT_KEY, fromPosts)
+      return fromPosts
     }
+  } catch (e) {
+    // далі список СвітлоБота
+  }
+  try {
+    const fact = mergeFact(same, findChannel(parseChannels(await loadText(SVITLOBOT.list)), id), id, nowMs)
     Storage.set(FACT_KEY, fact)
     return fact
   } catch (e) {

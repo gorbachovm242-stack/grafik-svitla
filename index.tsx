@@ -5,8 +5,8 @@ import {
 import type { WidgetFamily } from "scripting"
 import type { Channel, Config, Data, Fact, FactStatus } from "./logic"
 import {
-  DEFAULT_LOOK, LOCK_LOOKS, LOOKS, REGIONS, SVITLOBOT, URLS, buildView, hm, kyivParts, lockLookOf, lookOf, notifyPrefs, regionById,
-  searchChannels, windowText,
+  DEFAULT_LOOK, LOCK_LOOKS, LOOKS, REGIONS, SVITLOBOT, URLS, buildView, channelId, hm, kyivParts, lockLookOf, lookOf, notifyPrefs,
+  regionById, searchChannels, windowText,
 } from "./logic"
 import { STYLES, styleOf } from "./theme"
 import { clearCache, getFact, getSchedule, loadChannels, loadGroups, readConfig, writeConfig } from "./store"
@@ -132,6 +132,9 @@ function App() {
   const now = kyivParts(new Date())
   const view = buildView(cfg, { ...data, fact }, now)
   const found = channels && query.trim() ? searchChannels(channels, query) : []
+  // Новий канал зʼявляється в пошуку лише після модерації СвітлоБота (кілька днів), а за посиланням працює одразу.
+  const direct = channelId(query)
+  const directNew = /^svitlobot_/i.test(direct) && !found.some((c) => c.id.toLowerCase() === direct.toLowerCase()) ? direct : ""
   const prefs = cfg ? notifyPrefs(cfg) : { change: true, off: true, on: true }
   const sameRegion = cfg && cfg.region === region
   const official = regionById(region)?.official
@@ -199,9 +202,19 @@ function App() {
               value={query}
               onChanged={(value: string) => setQuery(value)}
             />
+            {directNew ? (
+              <Button
+                title={`Підключити канал ${directNew}`}
+                action={() => chooseSensor({ id: directNew, name: directNew, status: "unknown", since: null, users: 0, queue: null })}
+              />
+            ) : null}
             {query.trim() && channelsError ? <Text foregroundStyle="secondaryLabel">{channelsError}</Text> : null}
             {query.trim() && !channelsError && channels === null ? <Text foregroundStyle="secondaryLabel">Завантажую датчики…</Text> : null}
-            {query.trim() && channels !== null && !found.length ? <Text foregroundStyle="secondaryLabel">Нічого не знайдено</Text> : null}
+            {query.trim() && channels !== null && !found.length && !directNew ? (
+              <Text foregroundStyle="secondaryLabel">
+                Нічого не знайдено. Новий датчик зʼявляється в пошуку лише після перевірки СвітлоБотом (кілька днів), а свій канал можна підключити одразу: вставте посилання t.me/svitlobot_…
+              </Text>
+            ) : null}
             {found.map((channel) => (
               <Button title={`${MARKS[channel.status]} ${channel.name}`} action={() => chooseSensor(channel)} />
             ))}
