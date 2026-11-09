@@ -3,7 +3,7 @@ import { VStack, HStack, ZStack, Spacer, Text, Image, Button, TimerIntervalLabel
 import type { Color, FontWeight, TextAlignment, VirtualNode, WidgetFamily } from "scripting"
 import type { Now, Run, View } from "./logic"
 import {
-  DEFAULT_LOCK_LOOK, DEFAULT_LOOK, captionText, changeDate, changeVerb, hasTimer, hm, isCharging, lockLine, lockTitle,
+  DEFAULT_LOOK, bulbState, captionText, changeDate, changeVerb, hasTimer, hm, isCharging, lockLine, lockLookOf, lockTitle,
   lockVerb, lookOf, quietWords, windowText,
 } from "./logic"
 import { Battery, DayLook, Garland, House, PICTURES, Ring, Tiles } from "./looks"
@@ -484,6 +484,13 @@ function Large({ c, look }: { c: Ctx; look: string }) {
 // ---------- Екран блокування ----------
 // iOS фарбує віджет сама, тож кольорів тексту не задаємо.
 
+// Лампочка замість батареї: світиться, коли світло є, перекреслена, коли немає, контур, коли можливе відключення.
+function Bulb({ view, size }: { view: View; size: number }) {
+  const state = bulbState(view)
+  const symbol = state === "on" ? "lightbulb.max.fill" : state === "off" ? "lightbulb.slash.fill" : "lightbulb"
+  return <Image systemName={symbol} font={size} fontWeight="semibold" frame={{ width: Math.round(size * 1.2), height: Math.round(size * 1.2) }} />
+}
+
 function LockDetail({ c, timerSize, timerWeight = "regular" }: { c: Ctx; timerSize: number; timerWeight?: FontWeight }) {
   const { view } = c
   if (view.notice) return <Label text={view.notice} size={12} lines={2} />
@@ -535,7 +542,9 @@ function Rectangular({ c, look }: { c: Ctx; look: string }) {
   const hasDay = view.todayRuns.length > 0
   if (look === "garland" && hasDay) return <LockGarland c={c} />
   let picture: VirtualNode | null = null
-  if (hasDay && look === "ring") {
+  if (look === "bulb") {
+    picture = <Bulb view={view} size={38} />
+  } else if (hasDay && look === "ring") {
     picture = (
       <ZStack frame={{ width: 52, height: 52 }}>
         <Ring size={52} lineWidth={5} runs={view.todayRuns} nowMin={view.nowMin} colors={LOCK_RING} />
@@ -562,7 +571,7 @@ function Rectangular({ c, look }: { c: Ctx; look: string }) {
       ) : (
         <VStack alignment="leading" spacing={0}>
           <Label text={lockTitle(view)} size={14} weight="bold" scale={0.65} />
-          <LockDetail c={c} timerSize={look === "battery" ? 19 : 15} timerWeight={look === "battery" ? "bold" : "regular"} />
+          <LockDetail c={c} timerSize={look === "bulb" ? 19 : 15} timerWeight={look === "bulb" ? "bold" : "regular"} />
           <FactLine c={c} compact size={11} lock />
         </VStack>
       )}
@@ -573,6 +582,7 @@ function Rectangular({ c, look }: { c: Ctx; look: string }) {
 
 // Круглий віджет: малюнок і час наступної зміни.
 const CIRCULAR_BOX: Record<string, { x: number; y: number; w: number; h: number }> = {
+  bulb: { x: 18, y: 6, w: 32, h: 32 },
   house: { x: 20, y: 6, w: 28, h: 37 },
   tiles: { x: 14, y: 15, w: 40, h: 26 },
   garland: { x: 5, y: 12, w: 58, h: 30 },
@@ -594,7 +604,8 @@ function Circular({ c, look }: { c: Ctx; look: string }) {
   }
   const box = CIRCULAR_BOX[look]
   let picture: VirtualNode
-  if (look === "battery") picture = <Battery width={box.w} height={box.h} view={view} paint={LOCK_PAINT} />
+  if (look === "bulb") picture = <Bulb view={view} size={26} />
+  else if (look === "battery") picture = <Battery width={box.w} height={box.h} view={view} paint={LOCK_PAINT} />
   else if (look === "house") picture = <House width={box.w} height={box.h} runs={runs} nowMin={nowMin} paint={LOCK_PAINT} />
   else if (look === "tiles") picture = <Tiles width={box.w} height={box.h} runs={runs} nowMin={nowMin} paint={LOCK_PAINT} />
   else picture = <Garland width={box.w} height={box.h} runs={runs} nowMin={nowMin} paint={LOCK_PAINT} />
@@ -625,7 +636,7 @@ export function WidgetContent({
   const theme = transparent ? CLEAR_THEME : themeFor(view)
   const c: Ctx = { view, now, date, theme, width, height }
   if (family === "accessoryInline") return <Inline view={view} />
-  const lockLook = lookOf(view.lockLook, DEFAULT_LOCK_LOOK)
+  const lockLook = lockLookOf(view.lockLook)
   if (family === "accessoryCircular") return <Circular c={c} look={lockLook} />
   if (family === "accessoryRectangular") return <Rectangular c={c} look={lockLook} />
   const look = lookOf(view.look, DEFAULT_LOOK)

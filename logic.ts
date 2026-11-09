@@ -598,7 +598,29 @@ export const LOOKS: Record<string, { name: string }> = {
   ring: { name: "Кільце" },
 }
 export const DEFAULT_LOOK = "house"
-export const DEFAULT_LOCK_LOOK = "battery" // на екрані блокування повний графік зайвий
+// Екран блокування: замість батареї лампочка (09.11.2026, на прохання користувача). Повний графік там зайвий.
+export const LOCK_LOOKS: Record<string, { name: string }> = {
+  bulb: { name: "Лампочка" },
+  house: { name: "Будинок" },
+  tiles: { name: "Плитки" },
+  garland: { name: "Гірлянда" },
+  ring: { name: "Кільце" },
+}
+export const DEFAULT_LOCK_LOOK = "bulb"
+
+export function lockLookOf(id: string | null | undefined): string {
+  if (id === "battery") return "bulb"
+  return id && LOCK_LOOKS[id] ? id : DEFAULT_LOCK_LOOK
+}
+
+// Лампочка світиться, коли світло є: за датчиком, а без нього за графіком. Без світла перекреслена.
+export function bulbState(view: View): "on" | "off" | "maybe" {
+  const fact = view.fact
+  if (fact && (fact.kind === "on" || fact.kind === "off")) return fact.kind
+  if (view.kind === "on") return "on"
+  if (view.kind === "off") return "off"
+  return "maybe"
+}
 
 export function lookOf(id: string | null | undefined, fallback: string): string {
   return id && LOOKS[id] ? id : fallback
@@ -724,21 +746,32 @@ export function changeMessage(changes: Change[], now: Now, group: string): { tit
 // де бот сам пише «Світло з'явилося … Його не було 3год 17хв».
 
 export const SVITLOBOT = {
-  list: "https://api.svitlobot.in.ua/website/getChannels",
+  list: "https://api.svitlobot.in.ua/website/getChannelsForMap",
   howTo: "https://svitlobot.in.ua/instructions",
   posts: (channel: string) => `https://t.me/s/${channel}`,
 }
 
 export type FactStatus = "on" | "off" | "unknown"
-export type Channel = { id: string; name: string; status: FactStatus; since: number | null; users: number }
+// queue: як СвітлоБот підписує розклад датчика («Запорізька обл. — група 3.2», у Києві «Група 4.1»), null якщо не обрано.
+export type Channel = { id: string; name: string; status: FactStatus; since: number | null; users: number; queue: string | null }
 
-// Рядок списку: стан;&;час зміни (UTC);&;назва;&;канал;&;кількість[;&;широта;&;довгота].
-// Стан 1: світло є, 2: світла немає, інше: датчик не на звʼязку або даних немає.
+// Список для мапи: -1;&&&;стан;&&&;час зміни (UTC);&&&;назва;&&&;канал;&&&;кількість;&&&;широта;&&&;довгота;&&&;…;&&&;розклад;&&&;…
+// Короткий список: стан;&;час зміни;&;назва;&;канал;&;кількість. Стан 1: світло є, 2: світла немає, інше: датчик мовчить.
 export function parseChannels(text: string): Channel[] {
   const out: Channel[] = []
   for (const line of text.split("\n")) {
-    const f = line.split(";&;")
-    if (f.length < 5) continue
+    let f: string[]
+    let queue: string | null = null
+    if (line.includes(";&&&;")) {
+      const m = line.split(";&&&;")
+      if (m.length < 6) continue
+      f = m.slice(1, 6)
+      const q = (m[9] || "").trim()
+      queue = q && q !== "-" ? q : null
+    } else {
+      f = line.split(";&;")
+      if (f.length < 5) continue
+    }
     const id = f[3].trim()
     if (!/^[A-Za-z0-9_]+$/.test(id)) continue
     const code = parseInt(f[0].trim(), 10)
@@ -749,9 +782,50 @@ export function parseChannels(text: string): Channel[] {
       status: code === 1 ? "on" : code === 2 ? "off" : "unknown",
       since: Number.isFinite(since) ? since : null,
       users: Math.max(0, (parseInt(f[4].trim(), 10) || 0) - 1),
+      queue,
     })
   }
   return out
+}
+
+// Як СвітлоБот називає регіон у розкладі датчика. Київ без префікса («Група 4.1»).
+const SVITLOBOT_REGIONS: Record<string, string> = {
+  zaporizhzhia: "Запорізька обл.", kyiv: "", "kyiv-oblast": "Київська обл.", "dnipro-dnem": "Дніпро (ДТЕК)",
+  "dnipro-cek": "Дніпро (ЦЕК)", odesa: "Одеса та обл.", vinnytsia: "Вінницька обл.", cherkasy: "Черкаська обл.",
+  chernihiv: "Чернігівська обл.", kharkiv: "Харківська обл.", khmelnytskyi: "Хмельницька обл.", lviv: "Львівська обл.",
+  poltava: "Полтавська обл.", "ivano-frankivsk": "Івано-Франківська обл.", rivne: "Рівненська обл.",
+  ternopil: "Тернопільська обл.", zakarpattia: "Закарпатська обл.", zhytomyr: "Житомирська обл.",
+}
+
+// Чи датчик стоїть у цій черзі цього регіону.
+export function inQueue(ch: Channel, region: string, group: string): boolean {
+  if (!ch.queue || !(region in SVITLOBOT_REGIONS)) return false
+  const m = /(\d+)[.,](\d+)/.exec(ch.queue)
+  if (!m || `${m[1]}.${m[2]}` !== group) return false
+  const prefix = SVITLOBOT_REGIONS[region]
+  return prefix ? ch.queue.startsWith(prefix) : /^Група\s/.test(ch.queue)
+}
+
+export const queueId = (region: string, group: string) => `queue:${region}:${group}`
+export const isQueueFact = (fact: { channel: string }) => fact.channel.startsWith("queue:")
+
+export type QueueCount = { on: number; off: number; total: number }
+
+// Без власного датчика: усі датчики СвітлоБота з черги користувача. Стан той, що в більшості (від 60 %),
+// час зміни медіанний серед них; інакше «по-різному». Датчиків немає: null.
+export function queueChannel(list: Channel[], region: string, group: string): { channel: Channel; count: QueueCount } | null {
+  const sensors = list.filter((c) => inQueue(c, region, group))
+  const on = sensors.filter((c) => c.status === "on")
+  const off = sensors.filter((c) => c.status === "off")
+  const total = on.length + off.length
+  if (!total) return null
+  const status: FactStatus = on.length >= total * 0.6 ? "on" : off.length >= total * 0.6 ? "off" : "unknown"
+  const pool = status === "on" ? on : status === "off" ? off : []
+  const times = pool.map((c) => c.since).filter((t): t is number => t !== null).sort((a, b) => a - b)
+  return {
+    channel: { id: queueId(region, group), name: `черга ${group}`, status, since: times.length ? times[Math.floor(times.length / 2)] : null, users: total, queue: null },
+    count: { on: on.length, off: off.length, total },
+  }
 }
 
 // Посилання, «@назва» чи сама назва каналу: лишаємо назву.
@@ -829,9 +903,11 @@ export type Fact = {
   lastOffEnd: number | null // коли те відключення скінчилося
   postsFor: number | null // для якої зміни вже шукали тривалість у дописах каналу
   checkedAt: number
+  count?: QueueCount | null // лише для черги: скільки датчиків зі світлом і без
 }
 
 // Новий стан датчика разом із попереднім: якщо бачили початок відключення, тривалість точна.
+// У черзі медіанний час зміни трохи гуляє між перевірками, тож те саме ввімкнення — у межах 30 хвилин.
 export function mergeFact(prev: Fact | null, ch: Channel | null, id: string, nowMs: number): Fact {
   const same = prev && prev.channel.toLowerCase() === id.toLowerCase() ? prev : null
   let lastOffMin = same ? same.lastOffMin : null
@@ -840,11 +916,13 @@ export function mergeFact(prev: Fact | null, ch: Channel | null, id: string, now
   if (!ch) {
     return { channel: same ? same.channel : id, name: same ? same.name : id, status: "missing", since: null, lastOffMin, lastOffEnd, postsFor, checkedAt: nowMs }
   }
-  if (ch.status === "on" && ch.since !== null && lastOffEnd !== ch.since) {
+  if (ch.status === "on" && ch.since !== null) {
     if (same && same.status === "off" && same.since !== null && same.since < ch.since) {
       lastOffMin = Math.round((ch.since - same.since) / 60000)
       lastOffEnd = ch.since
-    } else {
+    } else if (same && same.status === "on" && same.since !== null && Math.abs(ch.since - same.since) <= 30 * 60000) {
+      // те саме ввімкнення: тривалість лишається
+    } else if (lastOffEnd !== ch.since) {
       lastOffMin = null
       lastOffEnd = null
     }
@@ -852,9 +930,16 @@ export function mergeFact(prev: Fact | null, ch: Channel | null, id: string, now
   return { channel: ch.id, name: ch.name, status: ch.status, since: ch.since, lastOffMin, lastOffEnd, postsFor, checkedAt: nowMs }
 }
 
+// Факт для черги, з тією самою памʼяттю про тривалість, що й для одного датчика.
+export function queueFact(prev: Fact | null, list: Channel[], region: string, group: string, nowMs: number): Fact | null {
+  const q = queueChannel(list, region, group)
+  return q ? { ...mergeFact(prev, q.channel, q.channel.id, nowMs), count: q.count } : null
+}
+
 // Світло повернулося, а початку відключення не бачили: тривалість шукаємо в дописах каналу, один раз на зміну.
+// У черзі одного каналу немає, тож там не шукаємо.
 export function needsPosts(fact: Fact): boolean {
-  return fact.status === "on" && fact.since !== null && fact.lastOffMin === null && fact.postsFor !== fact.since
+  return !isQueueFact(fact) && fact.status === "on" && fact.since !== null && fact.lastOffMin === null && fact.postsFor !== fact.since
 }
 
 export function withComeback(fact: Fact, comebacks: Comeback[]): Fact {
@@ -899,12 +984,15 @@ export function factView(fact: Fact | null | undefined, now: Now, nowMs: number)
     return { kind: "missing", full: "Датчик не знайдено в СвітлоБоті", line: "Датчик не знайдено", short: "датчик ?", timerFrom: null, checked }
   }
   const when = fact.since !== null ? sinceText(fact.since, now) : null
+  // Для черги в налаштуваннях видно, за скількома датчиками.
+  const count = isQueueFact(fact) ? fact.count || null : null
+  const source = count ? ` (за ${count.total} ${count.total % 10 === 1 && count.total % 100 !== 11 ? "датчиком" : "датчиками"} черги)` : ""
   if (fact.status === "on") {
     const gone = fact.lastOffMin !== null && fact.lastOffMin > 0 ? `не було ${durationText(fact.lastOffMin)}` : null
     const since = when ? `Світло є з ${when}` : "Світло є"
     return {
       kind: "on",
-      full: gone ? `${since} · ${gone}` : since,
+      full: (gone ? `${since} · ${gone}` : since) + source,
       line: gone ? `Світло є · ${gone}` : since,
       short: gone || (when ? `є з ${when}` : "світло є"),
       timerFrom: null,
@@ -913,7 +1001,17 @@ export function factView(fact: Fact | null | undefined, now: Now, nowMs: number)
   }
   if (fact.status === "off") {
     const line = when ? `Світла немає з ${when}` : "Світла немає"
-    return { kind: "off", full: line, line, short: when ? `немає з ${when}` : "світла немає", timerFrom: old ? null : fact.since, checked }
+    return { kind: "off", full: line + source, line, short: when ? `немає з ${when}` : "світла немає", timerFrom: old ? null : fact.since, checked }
+  }
+  if (count) {
+    return {
+      kind: "unknown",
+      full: `У черзі по-різному: світло є в ${count.on} з ${count.total}`,
+      line: `У черзі по-різному: ${count.on} з ${count.total}`,
+      short: "по-різному",
+      timerFrom: null,
+      checked,
+    }
   }
   const line = when ? `Датчик мовчить з ${when}` : "Датчик мовчить"
   return { kind: "unknown", full: line, line, short: "датчик мовчить", timerFrom: null, checked }

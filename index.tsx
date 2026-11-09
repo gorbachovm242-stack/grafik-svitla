@@ -5,7 +5,7 @@ import {
 import type { WidgetFamily } from "scripting"
 import type { Channel, Config, Data, Fact, FactStatus } from "./logic"
 import {
-  DEFAULT_LOCK_LOOK, DEFAULT_LOOK, LOOKS, REGIONS, SVITLOBOT, URLS, buildView, hm, kyivParts, lookOf, notifyPrefs, regionById,
+  DEFAULT_LOOK, LOCK_LOOKS, LOOKS, REGIONS, SVITLOBOT, URLS, buildView, hm, kyivParts, lockLookOf, lookOf, notifyPrefs, regionById,
   searchChannels, windowText,
 } from "./logic"
 import { STYLES, styleOf } from "./theme"
@@ -18,8 +18,10 @@ const HOW_TO_ADD =
   "Екран блокування: утримуйте його, «Налаштувати» → «Екран блокування», торкніться поля віджетів і додайте Scripting. " +
   "Потім торкніться доданого віджета й оберіть «Графік світла»."
 
-const SENSOR_ABOUT =
-  "Датчик СвітлоБота показує, чи є світло насправді і скільки його не було. Знайдіть датчик свого будинку чи сусідів за вулицею або вставте посилання на канал."
+// Без власного датчика факт береться з усіх датчиків СвітлоБота вашої черги, нічого налаштовувати не треба.
+const QUEUE_HINT = "Точніше покаже датчик саме вашого будинку: знайдіть його за вулицею або вставте посилання на канал."
+const NO_SENSORS =
+  "У вашій черзі поки немає датчиків СвітлоБота. Знайдіть датчик свого будинку чи сусідів за вулицею, вставте посилання на канал або поставте свій."
 
 const MARKS: Record<FactStatus, string> = { on: "🟢", off: "🔴", unknown: "⚪️" }
 
@@ -38,6 +40,7 @@ function App() {
   const [data, setData] = useState<Data>({ sched: null, status: "ok" })
   const [loading, setLoading] = useState(false)
   const [fact, setFact] = useState<Fact | null>(null)
+  const [factLoaded, setFactLoaded] = useState(false)
   const [query, setQuery] = useState("")
   const [channels, setChannels] = useState<Channel[] | null>(null)
   const [channelsError, setChannelsError] = useState<string | null>(null)
@@ -50,6 +53,7 @@ function App() {
     const [fresh, sensor] = await Promise.all([getSchedule(next, now, force), getFact(next, force)])
     setData(fresh)
     setFact(sensor)
+    setFactLoaded(true)
     await tryUpdateNotifications(next, fresh.sched, now, date, 4000)
     setLoading(false)
     Widget.reloadAll()
@@ -74,14 +78,15 @@ function App() {
     Widget.reloadAll()
   }
 
-  function removeSensor() {
+  // Без свого датчика знову працює факт за чергою.
+  async function removeSensor() {
     if (!cfg) return
     const next: Config = { ...cfg }
     delete next.svitlobot
     delete next.svitlobotName
     writeConfig(next)
     setCfg(next)
-    setFact(null)
+    setFact(await getFact(next, true))
     Widget.reloadAll()
   }
 
@@ -178,14 +183,16 @@ function App() {
 
         {cfg ? (
           <Section title="Чи є світло насправді">
-            {cfg.svitlobot ? (
-              <Text font={17} fontWeight="semibold">
-                {view.fact ? `${view.fact.full}${view.fact.checked ? ` · ${view.fact.checked}` : ""}` : "Перевіряю датчик…"}
-              </Text>
+            {view.fact ? (
+              <Text font={17} fontWeight="semibold">{`${view.fact.full}${view.fact.checked ? ` · ${view.fact.checked}` : ""}`}</Text>
             ) : (
-              <Text foregroundStyle="secondaryLabel">{SENSOR_ABOUT}</Text>
+              <Text foregroundStyle="secondaryLabel">{cfg.svitlobot || !factLoaded ? "Перевіряю датчики…" : NO_SENSORS}</Text>
             )}
-            {cfg.svitlobot ? <Text foregroundStyle="secondaryLabel">{`Датчик: ${cfg.svitlobotName || cfg.svitlobot}`}</Text> : null}
+            {cfg.svitlobot ? (
+              <Text foregroundStyle="secondaryLabel">{`Датчик: ${cfg.svitlobotName || cfg.svitlobot}`}</Text>
+            ) : view.fact ? (
+              <Text foregroundStyle="secondaryLabel">{QUEUE_HINT}</Text>
+            ) : null}
             <TextField
               title="Пошук датчика"
               prompt={cfg.svitlobot ? "Інший датчик: вулиця чи посилання" : "Вулиця, будинок або посилання на канал"}
@@ -220,12 +227,12 @@ function App() {
             </Picker>
             <Picker
               title="Екран блокування"
-              value={lookOf(cfg.lockLook, DEFAULT_LOCK_LOOK)}
+              value={lockLookOf(cfg.lockLook)}
               onChanged={(value: string) => update({ lockLook: value })}
               pickerStyle="menu"
             >
-              {Object.keys(LOOKS).map((id) => (
-                <Text tag={id}>{LOOKS[id].name}</Text>
+              {Object.keys(LOCK_LOOKS).map((id) => (
+                <Text tag={id}>{LOCK_LOOKS[id].name}</Text>
               ))}
             </Picker>
             <Picker title="Фон" value={styleOf(cfg.style)} onChanged={(value: string) => update({ style: value })} pickerStyle="menu">

@@ -2,12 +2,13 @@
 import type { Channel, Config, Data, Fact, Now, Sched, Region } from "./logic"
 import {
   SETTINGS, SVITLOBOT, channelId, fetchSchedule, findChannel, groupsFor, mergeFact, needsPosts, parseChannels, parseComebacks,
-  withComeback,
+  queueFact, queueId, withComeback,
 } from "./logic"
 
 const CONFIG_KEY = "config"
 const CACHE_KEY = "cache"
 const FACT_KEY = "fact"
+const NONE_KEY = "factNone"
 
 export function readConfig(): Config | null {
   const cfg = Storage.get<Config>(CONFIG_KEY)
@@ -61,17 +62,34 @@ export async function loadChannels(): Promise<Channel[]> {
   return parseChannels(await loadText(SVITLOBOT.list))
 }
 
-// Стан обраного датчика. Перші 4 хвилини після перевірки мережу не чіпаємо; без мережі віддаємо збережене
-// (рядок у віджеті тоді покаже, коли перевіряли востаннє). Датчика не обрано: null.
+// Фактичний стан: обраний датчик, а без нього всі датчики СвітлоБота з черги користувача.
+// Перші 4 хвилини після перевірки мережу не чіпаємо; без мережі віддаємо збережене
+// (рядок у віджеті тоді покаже, коли перевіряли востаннє). У черзі немає датчиків: null.
 export async function getFact(cfg: Config | null, force: boolean): Promise<Fact | null> {
-  const id = cfg && cfg.svitlobot ? channelId(cfg.svitlobot) : ""
-  if (!id) return null
+  if (!cfg) return null
+  const own = cfg.svitlobot ? channelId(cfg.svitlobot) : ""
+  const id = own || queueId(cfg.region, cfg.group)
   const saved = Storage.get<Fact>(FACT_KEY)
   const same = saved && saved.channel.toLowerCase() === id.toLowerCase() ? saved : null
   const nowMs = Date.now()
   if (!force && same && nowMs - same.checkedAt < SETTINGS.factCacheMinutes * 60000) return same
+  // У черзі датчиків не було: перепитуємо раз на годину, а не за кожним оновленням віджета.
+  const none = Storage.get<{ id: string; checkedAt: number }>(NONE_KEY)
+  if (!force && !same && none && none.id === id && nowMs - none.checkedAt < 60 * 60000) return null
   try {
-    let fact = mergeFact(same, findChannel(parseChannels(await loadText(SVITLOBOT.list)), id), id, nowMs)
+    const list = parseChannels(await loadText(SVITLOBOT.list))
+    if (!own) {
+      const queue = queueFact(same, list, cfg.region, cfg.group, nowMs)
+      if (queue) {
+        Storage.set(FACT_KEY, queue)
+        Storage.remove(NONE_KEY)
+      } else {
+        Storage.remove(FACT_KEY)
+        Storage.set(NONE_KEY, { id, checkedAt: nowMs })
+      }
+      return queue
+    }
+    let fact = mergeFact(same, findChannel(list, id), id, nowMs)
     if (needsPosts(fact)) {
       try {
         fact = withComeback(fact, parseComebacks(await loadText(SVITLOBOT.posts(fact.channel))))
