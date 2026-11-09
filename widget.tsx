@@ -3,7 +3,7 @@
 import { Widget, VStack, Text } from "scripting"
 import { SETTINGS, buildView, kyivParts, refreshDate } from "./logic"
 import type { Data } from "./logic"
-import { getSchedule, readConfig } from "./store"
+import { getFact, getSchedule, readConfig } from "./store"
 import { tryUpdateNotifications } from "./notifications"
 import { WidgetContent } from "./widget_view"
 
@@ -11,8 +11,12 @@ async function main() {
   const date = new Date()
   const now = kyivParts(date)
   const cfg = readConfig()
-  const data: Data = cfg ? await getSchedule(cfg, now, false, SETTINGS.widgetBudgetMs) : { sched: null, status: "ok" }
-  const view = buildView(cfg, data, now)
+  // Графік і датчик СвітлоБота паралельно: віджет має обмежений час.
+  const [data, fact]: [Data, Awaited<ReturnType<typeof getFact>>] = await Promise.all([
+    cfg ? getSchedule(cfg, now, false, SETTINGS.widgetBudgetMs) : Promise.resolve<Data>({ sched: null, status: "ok" }),
+    getFact(cfg, false),
+  ])
+  const view = buildView(cfg, { ...data, fact }, now)
   if (cfg) await tryUpdateNotifications(cfg, data.sched, now, date, 4000)
   const size = Widget.displaySize
   // Прозорий фон: імітація з налаштувань віджета або віджет Scripting із прозорим чи розмитим тлом.

@@ -10,6 +10,9 @@ export const SETTINGS = {
   noticeMinutes: 10, // за скільки хвилин попереджати про вимкнення й увімкнення
   timeoutSeconds: 8, // очікування одного джерела
   widgetBudgetMs: 18000, // скільки часу віджет може витратити на всі джерела
+  factCacheMinutes: 4, // датчик СвітлоБота не перепитувати частіше
+  factRefreshMinutes: 15, // з датчиком віджет просить оновлення частіше
+  factStaleMinutes: 60, // старіші дані датчика позначаємо часом перевірки
 }
 
 export const URLS = {
@@ -77,12 +80,14 @@ export type Config = {
   style?: string
   look?: string
   lockLook?: string
+  svitlobot?: string // канал датчика СвітлоБота: чи є світло насправді
+  svitlobotName?: string // його назва-адреса для налаштувань
 }
 
 export function notifyPrefs(cfg: Config): { change: boolean; off: boolean; on: boolean } {
   return { change: cfg.notifyChange !== false, off: cfg.notifyOff !== false, on: cfg.notifyOn !== false }
 }
-export type Data = { sched: Sched | null; status: "ok" | "nogroup" | "fail" }
+export type Data = { sched: Sched | null; status: "ok" | "nogroup" | "fail"; fact?: Fact | null }
 export type Now = { ymd: string; min: number }
 export type Kind = "setup" | "nogroup" | "nodata" | "on" | "off" | "maybe" | "check" | "none"
 
@@ -107,6 +112,7 @@ export type View = {
   noticeShort: string | null
   stale: boolean
   checked: number | null
+  fact: FactView | null // що каже датчик СвітлоБота, якщо його обрано
 }
 
 // ---------- Час ----------
@@ -410,6 +416,7 @@ export function buildView(cfg: Config | null, data: Data, now: Now, nowMs: numbe
     style: cfg && cfg.style ? cfg.style : null, look: cfg && cfg.look ? cfg.look : null, lockLook: cfg && cfg.lockLook ? cfg.lockLook : null,
     nowMin: now.min, todayRuns: [], todayWindows: [], windowsLeft: [], tomorrowRuns: null, tomorrowWindows: null,
     runFrom: null, changeMin: null, short: "—", notice: null, noticeShort: null, stale: false, checked: null,
+    fact: cfg ? factView(data.fact, now, nowMs) : null,
   }
   if (!cfg) return view
 
@@ -543,9 +550,11 @@ export function captionText(view: View): string {
   return view.kind === "on" || view.kind === "off" || view.kind === "maybe" ? `${group} · за графіком` : group
 }
 
-// Коли iOS варто знову намалювати віджет: за 10 секунд після зміни стану, а між змінами раз на 30 хвилин.
+// Коли iOS варто знову намалювати віджет: за 10 секунд після зміни стану, а між змінами раз на 30 хвилин
+// (з датчиком СвітлоБота раз на 15, щоб фактичний стан не відставав).
 export function refreshDate(view: View, now: Now, date: Date): Date {
-  const latest = date.getTime() + SETTINGS.refreshMinutes * 60000
+  const minutes = view.fact ? SETTINGS.factRefreshMinutes : SETTINGS.refreshMinutes
+  const latest = date.getTime() + minutes * 60000
   if (view.changeMin === null) return new Date(latest)
   return new Date(Math.min(latest, changeDate(view, now, date).getTime() + 10000))
 }
@@ -706,4 +715,206 @@ export function changeMessage(changes: Change[], now: Now, group: string): { tit
     title: onlyNew ? "Новий графік відключень" : "Графік відключень змінився",
     body: `Черга ${group}, ${parts.join("; ")}`,
   }
+}
+
+// ---------- Фактичний стан: датчик СвітлоБота ----------
+// Графік каже, коли світло мають вимкнути, а датчик, чи воно є насправді. Датчик це телефон на зарядці чи роутер,
+// що щохвилини стукає до СвітлоБота (svitlobot.in.ua). Обирають його канал: свій або сусідів.
+// Джерела: відкритий список каналів (стан і час останньої зміни кожного) і публічна сторінка каналу в Telegram,
+// де бот сам пише «Світло з'явилося … Його не було 3год 17хв».
+
+export const SVITLOBOT = {
+  list: "https://api.svitlobot.in.ua/website/getChannels",
+  howTo: "https://svitlobot.in.ua/instructions",
+  posts: (channel: string) => `https://t.me/s/${channel}`,
+}
+
+export type FactStatus = "on" | "off" | "unknown"
+export type Channel = { id: string; name: string; status: FactStatus; since: number | null; users: number }
+
+// Рядок списку: стан;&;час зміни (UTC);&;назва;&;канал;&;кількість[;&;широта;&;довгота].
+// Стан 1: світло є, 2: світла немає, інше: датчик не на звʼязку або даних немає.
+export function parseChannels(text: string): Channel[] {
+  const out: Channel[] = []
+  for (const line of text.split("\n")) {
+    const f = line.split(";&;")
+    if (f.length < 5) continue
+    const id = f[3].trim()
+    if (!/^[A-Za-z0-9_]+$/.test(id)) continue
+    const code = parseInt(f[0].trim(), 10)
+    const since = Date.parse(f[1].trim())
+    out.push({
+      id,
+      name: f[2].trim().replace(/\s*,?\s*->\s*/g, ", "),
+      status: code === 1 ? "on" : code === 2 ? "off" : "unknown",
+      since: Number.isFinite(since) ? since : null,
+      users: Math.max(0, (parseInt(f[4].trim(), 10) || 0) - 1),
+    })
+  }
+  return out
+}
+
+// Посилання, «@назва» чи сама назва каналу: лишаємо назву.
+export function channelId(input: string): string {
+  const s = input.trim().replace(/^https?:\/\//i, "").replace(/^(www\.)?(t|telegram)\.me\/(s\/)?/i, "").replace(/^@/, "")
+  const id = s.split(/[/?#\s]/)[0]
+  return /^[A-Za-z0-9_]{4,64}$/.test(id) ? id : ""
+}
+
+export function findChannel(list: Channel[], id: string): Channel | null {
+  const key = id.toLowerCase()
+  return list.find((c) => c.id.toLowerCase() === key) || null
+}
+
+function searchWords(text: string): string {
+  return text.toLowerCase().replace(/[’'ʼ`]/g, "").replace(/[^0-9a-zа-яіїєґё_]+/g, " ").trim()
+}
+
+// Пошук за вулицею, будинком чи назвою каналу: кожне слово запиту має знайтися. Більші канали вище.
+export function searchChannels(list: Channel[], query: string, limit = 8): Channel[] {
+  const wanted = searchWords(query).split(" ").filter(Boolean)
+  if (!wanted.length) return []
+  const direct = channelId(query).toLowerCase()
+  return list
+    .filter((c) => (direct && c.id.toLowerCase() === direct) || wanted.every((w) => searchWords(`${c.name} ${c.id}`).includes(w)))
+    .sort((a, b) => b.users - a.users)
+    .slice(0, limit)
+}
+
+// «3год 17хв», «6хв», «1д 2год» → хвилини.
+export function durationMin(text: string): number | null {
+  const d = /(\d+)\s*д/.exec(text)
+  const h = /(\d+)\s*год/.exec(text)
+  const m = /(\d+)\s*хв/.exec(text)
+  if (!d && !h && !m) return null
+  return (d ? Number(d[1]) * 1440 : 0) + (h ? Number(h[1]) * 60 : 0) + (m ? Number(m[1]) : 0)
+}
+
+function plainText(html: string): string {
+  return html
+    .replace(/<br\s*\/?>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&#39;|&apos;|&#x27;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+export type Comeback = { at: number; offMin: number }
+
+// Дописи бота на t.me/s/канал: «🟢 10:10 Світло з'явилося 🕓 Його не було 3год 17хв» і час допису.
+export function parseComebacks(html: string): Comeback[] {
+  const out: Comeback[] = []
+  const re = /tgme_widget_message_text[^>]*>([\s\S]*?)<\/div>[\s\S]*?<time datetime="([^"]+)"/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(html))) {
+    const text = plainText(m[1])
+    if (!/Світло з.явилося/.test(text)) continue
+    const gone = /не було\s*([0-9\sдгохв]+)/.exec(text)
+    const offMin = gone ? durationMin(gone[1]) : null
+    const at = Date.parse(m[2])
+    if (offMin !== null && Number.isFinite(at)) out.push({ at, offMin })
+  }
+  return out
+}
+
+export type Fact = {
+  channel: string
+  name: string
+  status: FactStatus | "missing" // missing: каналу вже немає в списку
+  since: number | null // коли змінився стан
+  lastOffMin: number | null // скільки не було світла минулого разу (коли воно вже є)
+  lastOffEnd: number | null // коли те відключення скінчилося
+  postsFor: number | null // для якої зміни вже шукали тривалість у дописах каналу
+  checkedAt: number
+}
+
+// Новий стан датчика разом із попереднім: якщо бачили початок відключення, тривалість точна.
+export function mergeFact(prev: Fact | null, ch: Channel | null, id: string, nowMs: number): Fact {
+  const same = prev && prev.channel.toLowerCase() === id.toLowerCase() ? prev : null
+  let lastOffMin = same ? same.lastOffMin : null
+  let lastOffEnd = same ? same.lastOffEnd : null
+  const postsFor = same ? same.postsFor : null
+  if (!ch) {
+    return { channel: same ? same.channel : id, name: same ? same.name : id, status: "missing", since: null, lastOffMin, lastOffEnd, postsFor, checkedAt: nowMs }
+  }
+  if (ch.status === "on" && ch.since !== null && lastOffEnd !== ch.since) {
+    if (same && same.status === "off" && same.since !== null && same.since < ch.since) {
+      lastOffMin = Math.round((ch.since - same.since) / 60000)
+      lastOffEnd = ch.since
+    } else {
+      lastOffMin = null
+      lastOffEnd = null
+    }
+  }
+  return { channel: ch.id, name: ch.name, status: ch.status, since: ch.since, lastOffMin, lastOffEnd, postsFor, checkedAt: nowMs }
+}
+
+// Світло повернулося, а початку відключення не бачили: тривалість шукаємо в дописах каналу, один раз на зміну.
+export function needsPosts(fact: Fact): boolean {
+  return fact.status === "on" && fact.since !== null && fact.lastOffMin === null && fact.postsFor !== fact.since
+}
+
+export function withComeback(fact: Fact, comebacks: Comeback[]): Fact {
+  const out: Fact = { ...fact, postsFor: fact.since }
+  if (fact.status !== "on" || fact.since === null || fact.lastOffMin !== null) return out
+  const since = fact.since
+  const hit = comebacks.find((c) => Math.abs(c.at - since) <= 10 * 60000)
+  return hit ? { ...out, lastOffMin: hit.offMin, lastOffEnd: since } : out
+}
+
+export type FactView = {
+  kind: FactStatus | "missing"
+  full: string // для налаштувань: «Світло є з 10:10 · не було 3 год 17 хв»
+  line: string // для віджета: «Світло є · не було 3 год 17 хв»
+  short: string // для тісних місць: «не було 3 год 17 хв»
+  timerFrom: number | null // від цього моменту рахує живий таймер, поки світла немає
+  checked: string | null // дані датчика старі: коли перевіряли востаннє
+}
+
+// «3 год 17 хв», «45 хв», «2 дн 3 год».
+export function durationText(min: number): string {
+  if (min < 60) return `${min} хв`
+  const d = Math.floor(min / 1440)
+  const h = Math.floor((min % 1440) / 60)
+  const m = min % 60
+  if (d) return h ? `${d} дн ${h} год` : `${d} дн`
+  return m ? `${h} год ${m} хв` : `${h} год`
+}
+
+// Момент за Києвом: сьогодні «06:53», інший день «08.11 06:53».
+export function sinceText(ms: number, now: Now): string {
+  const p = kyivParts(new Date(ms))
+  if (p.ymd === now.ymd) return hm(p.min)
+  return `${p.ymd.slice(8, 10)}.${p.ymd.slice(5, 7)} ${hm(p.min)}`
+}
+
+export function factView(fact: Fact | null | undefined, now: Now, nowMs: number): FactView | null {
+  if (!fact) return null
+  const old = nowMs - fact.checkedAt > SETTINGS.factStaleMinutes * 60000
+  const checked = old ? `дані ${sinceText(fact.checkedAt, now)}` : null
+  if (fact.status === "missing") {
+    return { kind: "missing", full: "Датчик не знайдено в СвітлоБоті", line: "Датчик не знайдено", short: "датчик ?", timerFrom: null, checked }
+  }
+  const when = fact.since !== null ? sinceText(fact.since, now) : null
+  if (fact.status === "on") {
+    const gone = fact.lastOffMin !== null && fact.lastOffMin > 0 ? `не було ${durationText(fact.lastOffMin)}` : null
+    const since = when ? `Світло є з ${when}` : "Світло є"
+    return {
+      kind: "on",
+      full: gone ? `${since} · ${gone}` : since,
+      line: gone ? `Світло є · ${gone}` : since,
+      short: gone || (when ? `є з ${when}` : "світло є"),
+      timerFrom: null,
+      checked,
+    }
+  }
+  if (fact.status === "off") {
+    const line = when ? `Світла немає з ${when}` : "Світла немає"
+    return { kind: "off", full: line, line, short: when ? `немає з ${when}` : "світла немає", timerFrom: old ? null : fact.since, checked }
+  }
+  const line = when ? `Датчик мовчить з ${when}` : "Датчик мовчить"
+  return { kind: "unknown", full: line, line, short: "датчик мовчить", timerFrom: null, checked }
 }

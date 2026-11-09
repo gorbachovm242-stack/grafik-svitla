@@ -1,14 +1,15 @@
 // Сторінка налаштувань: черга, три сповіщення, вигляд і фон віджета. Зміни одразу видно у віджеті.
 import {
-  Navigation, NavigationStack, List, Section, Text, Button, Picker, Toggle, Link, Script, Widget, useEffect, useState,
+  Navigation, NavigationStack, List, Section, Text, TextField, Button, Picker, Toggle, Link, Script, Widget, useEffect, useState,
 } from "scripting"
 import type { WidgetFamily } from "scripting"
-import type { Config, Data } from "./logic"
+import type { Channel, Config, Data, Fact, FactStatus } from "./logic"
 import {
-  DEFAULT_LOCK_LOOK, DEFAULT_LOOK, LOOKS, REGIONS, URLS, buildView, hm, kyivParts, lookOf, notifyPrefs, regionById, windowText,
+  DEFAULT_LOCK_LOOK, DEFAULT_LOOK, LOOKS, REGIONS, SVITLOBOT, URLS, buildView, hm, kyivParts, lookOf, notifyPrefs, regionById,
+  searchChannels, windowText,
 } from "./logic"
 import { STYLES, styleOf } from "./theme"
-import { clearCache, getSchedule, loadGroups, readConfig, writeConfig } from "./store"
+import { clearCache, getFact, getSchedule, loadChannels, loadGroups, readConfig, writeConfig } from "./store"
 import { resetNotifications, tryUpdateNotifications } from "./notifications"
 
 const HOW_TO_ADD =
@@ -16,6 +17,11 @@ const HOW_TO_ADD =
   "Потім утримуйте віджет, «Змінити віджет», і в полі Script оберіть «Графік світла».\n\n" +
   "Екран блокування: утримуйте його, «Налаштувати» → «Екран блокування», торкніться поля віджетів і додайте Scripting. " +
   "Потім торкніться доданого віджета й оберіть «Графік світла»."
+
+const SENSOR_ABOUT =
+  "Датчик СвітлоБота показує, чи є світло насправді і скільки його не було. Знайдіть датчик свого будинку чи сусідів за вулицею або вставте посилання на канал."
+
+const MARKS: Record<FactStatus, string> = { on: "🟢", off: "🔴", unknown: "⚪️" }
 
 const PREVIEWS: [WidgetFamily, string][] = [
   ["systemSmall", "Малий"],
@@ -31,16 +37,51 @@ function App() {
   const [groupsError, setGroupsError] = useState<string | null>(null)
   const [data, setData] = useState<Data>({ sched: null, status: "ok" })
   const [loading, setLoading] = useState(false)
+  const [fact, setFact] = useState<Fact | null>(null)
+  const [query, setQuery] = useState("")
+  const [channels, setChannels] = useState<Channel[] | null>(null)
+  const [channelsError, setChannelsError] = useState<string | null>(null)
 
   async function refresh(next: Config | null, force: boolean) {
     if (!next) return
     setLoading(true)
     const date = new Date()
     const now = kyivParts(date)
-    const fresh = await getSchedule(next, now, force)
+    const [fresh, sensor] = await Promise.all([getSchedule(next, now, force), getFact(next, force)])
     setData(fresh)
+    setFact(sensor)
     await tryUpdateNotifications(next, fresh.sched, now, date, 4000)
     setLoading(false)
+    Widget.reloadAll()
+  }
+
+  // Список датчиків вантажимо лише тоді, коли почали шукати.
+  useEffect(() => {
+    if (!query.trim() || channels !== null) return
+    setChannelsError(null)
+    loadChannels()
+      .then((list) => setChannels(list))
+      .catch(() => setChannelsError("Не вдалося завантажити датчики. Перевірте інтернет."))
+  }, [query])
+
+  async function chooseSensor(channel: Channel) {
+    if (!cfg) return
+    const next: Config = { ...cfg, svitlobot: channel.id, svitlobotName: channel.name }
+    writeConfig(next)
+    setCfg(next)
+    setQuery("")
+    setFact(await getFact(next, true))
+    Widget.reloadAll()
+  }
+
+  function removeSensor() {
+    if (!cfg) return
+    const next: Config = { ...cfg }
+    delete next.svitlobot
+    delete next.svitlobotName
+    writeConfig(next)
+    setCfg(next)
+    setFact(null)
     Widget.reloadAll()
   }
 
@@ -84,7 +125,8 @@ function App() {
   }
 
   const now = kyivParts(new Date())
-  const view = buildView(cfg, data, now)
+  const view = buildView(cfg, { ...data, fact }, now)
+  const found = channels && query.trim() ? searchChannels(channels, query) : []
   const prefs = cfg ? notifyPrefs(cfg) : { change: true, off: true, on: true }
   const sameRegion = cfg && cfg.region === region
   const official = regionById(region)?.official
@@ -133,6 +175,33 @@ function App() {
           )}
           {official ? <Link url={URLS.zoeQueue}>Не знаю свою чергу</Link> : null}
         </Section>
+
+        {cfg ? (
+          <Section title="Чи є світло насправді">
+            {cfg.svitlobot ? (
+              <Text font={17} fontWeight="semibold">
+                {view.fact ? `${view.fact.full}${view.fact.checked ? ` · ${view.fact.checked}` : ""}` : "Перевіряю датчик…"}
+              </Text>
+            ) : (
+              <Text foregroundStyle="secondaryLabel">{SENSOR_ABOUT}</Text>
+            )}
+            {cfg.svitlobot ? <Text foregroundStyle="secondaryLabel">{`Датчик: ${cfg.svitlobotName || cfg.svitlobot}`}</Text> : null}
+            <TextField
+              title="Пошук датчика"
+              prompt={cfg.svitlobot ? "Інший датчик: вулиця чи посилання" : "Вулиця, будинок або посилання на канал"}
+              value={query}
+              onChanged={(value: string) => setQuery(value)}
+            />
+            {query.trim() && channelsError ? <Text foregroundStyle="secondaryLabel">{channelsError}</Text> : null}
+            {query.trim() && !channelsError && channels === null ? <Text foregroundStyle="secondaryLabel">Завантажую датчики…</Text> : null}
+            {query.trim() && channels !== null && !found.length ? <Text foregroundStyle="secondaryLabel">Нічого не знайдено</Text> : null}
+            {found.map((channel) => (
+              <Button title={`${MARKS[channel.status]} ${channel.name}`} action={() => chooseSensor(channel)} />
+            ))}
+            {cfg.svitlobot ? <Button title="Прибрати датчик" role="destructive" action={() => removeSensor()} /> : null}
+            <Link url={SVITLOBOT.howTo}>Як поставити свій датчик</Link>
+          </Section>
+        ) : null}
 
         {cfg ? (
           <Section title="Сповіщення">

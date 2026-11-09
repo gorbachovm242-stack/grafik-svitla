@@ -1,5 +1,5 @@
 // Розкладки віджета для всіх розмірів. Таймер іде сам, навіть якщо iOS довго не оновлює віджет.
-import { VStack, HStack, ZStack, Spacer, Text, Image, Button, TimerIntervalLabel } from "scripting"
+import { VStack, HStack, ZStack, Spacer, Text, Image, Button, TimerIntervalLabel, DateLabel } from "scripting"
 import type { Color, FontWeight, TextAlignment, VirtualNode, WidgetFamily } from "scripting"
 import type { Now, Run, View } from "./logic"
 import {
@@ -90,6 +90,46 @@ function Footer({ c, size = 11 }: { c: Ctx; size?: number }) {
 
 function Checked({ c }: { c: Ctx }) {
   return c.view.checked !== null ? <Label text={`перевірено ${hm(c.view.checked)}`} size={10} color={c.theme.muted} /> : <Spacer />
+}
+
+// Датчик СвітлоБота: чи є світло насправді. Крапка зелена чи червона, без світла ще й живий таймер від вимкнення.
+// На екрані блокування iOS фарбує все сама, тож lock: без кольорів.
+function FactLine({ c, compact = false, size = 11, lock = false }: { c: Ctx; compact?: boolean; size?: number; lock?: boolean }) {
+  const fact = c.view.fact
+  if (!fact) return null
+  const dot: Color = fact.kind === "on" ? "systemGreen" : fact.kind === "off" ? "systemRed" : "systemGray"
+  // Поруч із живим таймером повний рядок не вміщується: «Немає з 11:53» і таймер.
+  const withTimer = !compact && fact.timerFrom !== null
+  const short = fact.short.charAt(0).toUpperCase() + fact.short.slice(1)
+  const text = compact ? fact.short : withTimer ? short : `${fact.line}${fact.checked ? ` · ${fact.checked}` : ""}`
+  const color = lock ? null : c.theme.text
+  return (
+    <HStack spacing={3}>
+      <Image systemName={fact.kind === "on" || fact.kind === "off" ? "circle.fill" : "circle.dashed"} font={size * 0.62} foregroundStyle={lock ? undefined : dot} />
+      <Label text={text} size={size} weight="medium" color={color} scale={0.75} />
+      {withTimer && fact.timerFrom !== null ? (
+        <DateLabel
+          date={new Date(fact.timerFrom)}
+          style="timer"
+          font={size}
+          fontWeight="medium"
+          fontDesign="monospaced"
+          monospacedDigit
+          foregroundStyle={color ?? undefined}
+          lineLimit={1}
+          frame={{ width: size * 4.6, alignment: "leading" }}
+        />
+      ) : null}
+    </HStack>
+  )
+}
+
+// У малих віджетах місця на рядок немає: лише крапка датчика поруч із «↻».
+function FactDot({ c, size = 9 }: { c: Ctx; size?: number }) {
+  const fact = c.view.fact
+  if (!fact) return null
+  const dot: Color = fact.kind === "on" ? "systemGreen" : fact.kind === "off" ? "systemRed" : "systemGray"
+  return <Image systemName={fact.kind === "on" || fact.kind === "off" ? "circle.fill" : "circle.dashed"} font={size} foregroundStyle={dot} />
 }
 
 function Status({ c, withTimer = true }: { c: Ctx; withTimer?: boolean }) {
@@ -207,6 +247,7 @@ function TextOnly({ c }: { c: Ctx }) {
         <Refresh color={c.theme.muted} />
       </HStack>
       <Status c={c} />
+      <FactLine c={c} size={12} />
       <Spacer minLength={0} />
     </VStack>
   )
@@ -230,7 +271,7 @@ function ChangeColumn({ c }: { c: Ctx }) {
       )}
       <Spacer minLength={3} />
       <HStack spacing={2}>
-        <Footer c={c} />
+        {view.fact ? <FactDot c={c} /> : <Footer c={c} />}
         <Spacer minLength={0} />
         <Refresh color={theme.muted} size={20} />
       </HStack>
@@ -257,6 +298,7 @@ function Headline({ c }: { c: Ctx }) {
         <HStack spacing={2}>
           <Label text={view.title} size={18} weight="bold" color={theme.text} />
           <Spacer minLength={0} />
+          <FactDot c={c} />
           <Refresh color={theme.muted} size={20} />
         </HStack>
         <Label text={view.noticeShort || view.sub} size={12} weight="medium" color={view.noticeShort ? theme.warn : theme.muted} lines={2} scale={0.8} />
@@ -269,6 +311,7 @@ function Headline({ c }: { c: Ctx }) {
         <Label text={changeVerb(view)} size={13} weight="medium" color={theme.muted} />
         <Spacer minLength={2} />
         <Footer c={c} />
+        <FactDot c={c} />
         <Refresh color={theme.muted} size={20} />
       </HStack>
       <HStack alignment="lastTextBaseline" spacing={2}>
@@ -301,7 +344,7 @@ function SmallBattery({ c }: { c: Ctx }) {
       <BatteryDial c={c} width={c.width - 28} height={Math.round((c.width - 28) * 0.54)} />
       {view.changeMin !== null ? <Label text={`${changeVerb(view)} ${view.short}`} size={15} weight="semibold" color={theme.text} /> : null}
       <HStack spacing={4}>
-        <Footer c={c} />
+        {view.fact ? <FactLine c={c} compact /> : <Footer c={c} />}
         <Refresh color={theme.muted} size={20} />
       </HStack>
       <Spacer minLength={0} />
@@ -316,7 +359,10 @@ function SmallRing({ c }: { c: Ctx }) {
       <ZStack frame={fill}>
         <RingDial c={c} size={size} runs={c.view.todayRuns} nowMin={c.view.nowMin} center={<DialText c={c} unit={size / 138} withTimer />} />
       </ZStack>
-      <Refresh color={c.theme.muted} size={24} />
+      <VStack spacing={2}>
+        <Refresh color={c.theme.muted} size={24} />
+        <FactDot c={c} />
+      </VStack>
     </ZStack>
   )
 }
@@ -362,7 +408,7 @@ function Medium({ c, look }: { c: Ctx; look: string }) {
         <Label text={list.text} size={13} weight="medium" color={theme.text} lines={2} scale={0.75} />
         <Spacer minLength={3} />
         <HStack spacing={2}>
-          <Checked c={c} />
+          {view.fact ? <FactLine c={c} /> : <Checked c={c} />}
           <Spacer minLength={0} />
           <Refresh color={theme.muted} />
         </HStack>
@@ -430,7 +476,7 @@ function Large({ c, look }: { c: Ctx; look: string }) {
         </VStack>
       </HStack>
       <Spacer minLength={4} />
-      <Checked c={c} />
+      {view.fact ? <FactLine c={c} size={12} /> : <Checked c={c} />}
     </VStack>
   )
 }
@@ -459,6 +505,7 @@ function LockStacked({ c }: { c: Ctx }) {
         </VStack>
       )}
       <LockDetail c={c} timerSize={15} timerWeight="semibold" />
+      <FactLine c={c} compact size={11} lock />
     </VStack>
   )
 }
@@ -516,6 +563,7 @@ function Rectangular({ c, look }: { c: Ctx; look: string }) {
         <VStack alignment="leading" spacing={0}>
           <Label text={lockTitle(view)} size={14} weight="bold" scale={0.65} />
           <LockDetail c={c} timerSize={look === "battery" ? 19 : 15} timerWeight={look === "battery" ? "bold" : "regular"} />
+          <FactLine c={c} compact size={11} lock />
         </VStack>
       )}
       <Spacer minLength={0} />
