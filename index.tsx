@@ -5,11 +5,13 @@ import {
 import type { WidgetFamily } from "scripting"
 import type { Channel, Config, Data, Fact, FactStatus } from "./logic"
 import {
-  DEFAULT_LOOK, LOCK_LOOKS, LOOKS, REGIONS, SVITLOBOT, URLS, buildView, channelId, hm, kyivParts, lockLookOf, lookOf, notifyPrefs,
-  regionById, searchChannels, windowText,
+  DEFAULT_LOOK, LOCK_LOOKS, LOOKS, REGIONS, SETTINGS, SVITLOBOT, URLS, buildView, channelId, hm, kyivParts, lockLookOf, lookOf,
+  notifyPrefs, regionById, searchChannels, windowText,
 } from "./logic"
 import { STYLES, styleOf } from "./theme"
-import { clearCache, getFact, getSchedule, loadChannels, loadGroups, readConfig, writeConfig } from "./store"
+import {
+  cachedData, cachedFact, clearCache, freshData, getFact, loadChannels, loadGroups, readConfig, writeConfig,
+} from "./store"
 import { resetNotifications, tryUpdateNotifications } from "./notifications"
 
 const HOW_TO_ADD =
@@ -37,9 +39,10 @@ function App() {
   const [region, setRegion] = useState<string>(readConfig()?.region ?? "zaporizhzhia")
   const [groups, setGroups] = useState<string[]>([])
   const [groupsError, setGroupsError] = useState<string | null>(null)
-  const [data, setData] = useState<Data>({ sched: null, status: "ok" })
+  // Збережене видно одразу, ще до мережі: без інтернету сторінка не порожня.
+  const [data, setData] = useState<Data>(cachedData(readConfig()))
   const [loading, setLoading] = useState(false)
-  const [fact, setFact] = useState<Fact | null>(null)
+  const [fact, setFact] = useState<Fact | null>(cachedFact(readConfig()))
   const [factLoaded, setFactLoaded] = useState(false)
   const [query, setQuery] = useState("")
   const [channels, setChannels] = useState<Channel[] | null>(null)
@@ -50,7 +53,7 @@ function App() {
     setLoading(true)
     const date = new Date()
     const now = kyivParts(date)
-    const [fresh, sensor] = await Promise.all([getSchedule(next, now, force), getFact(next, force)])
+    const { data: fresh, fact: sensor } = await freshData(next, now, force, SETTINGS.appBudgetMs, SETTINGS.timeoutSeconds * 1000)
     setData(fresh)
     setFact(sensor)
     setFactLoaded(true)

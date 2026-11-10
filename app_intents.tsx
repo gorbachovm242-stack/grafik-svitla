@@ -1,7 +1,7 @@
 // Кнопка «↻» у віджеті: свіжий графік і стан датчика з мережі, сповіщення, і віджет перемальовується одразу.
 import { AppIntentManager, AppIntentProtocol, Widget } from "scripting"
-import { kyivParts } from "./logic"
-import { getFact, getSchedule, readConfig } from "./store"
+import { SETTINGS, kyivParts } from "./logic"
+import { freshData, readConfig } from "./store"
 import { tryUpdateNotifications } from "./notifications"
 
 export const RefreshIntent = AppIntentManager.register({
@@ -12,8 +12,9 @@ export const RefreshIntent = AppIntentManager.register({
     if (cfg) {
       const date = new Date()
       const now = kyivParts(date)
-      const [data] = await Promise.all([getSchedule(cfg, now, true, 15000), getFact(cfg, true)])
-      await tryUpdateNotifications(cfg, data.sched, now, date, 4000)
+      // Без інтернету не довше за SETTINGS.buttonBudgetMs, а віджет після цього одразу малює збережене.
+      const { data } = await freshData(cfg, now, true, SETTINGS.buttonBudgetMs, SETTINGS.widgetRequestMs)
+      await tryUpdateNotifications(cfg, data.sched, now, date, 3000)
     }
     Widget.reloadAll()
   },
