@@ -1,7 +1,8 @@
-// Кнопка «↻» у віджеті: свіжий графік і стан датчика з мережі, сповіщення, і віджет перемальовується одразу.
+// Кнопки у віджеті. «↻»: свіжий графік і стан датчика з мережі, сповіщення, і віджет перемальовується одразу.
+// «Завтра ›» і «‹ Сьогодні»: малий і середній віджет показують інший день, малюючи збережене без мережі.
 import { AppIntentManager, AppIntentProtocol, Widget } from "scripting"
 import { SETTINGS, kyivParts } from "./logic"
-import { freshData, readConfig } from "./store"
+import { freshData, readConfig, writeDay } from "./store"
 import { tryUpdateNotifications } from "./notifications"
 
 export const RefreshIntent = AppIntentManager.register({
@@ -16,6 +17,15 @@ export const RefreshIntent = AppIntentManager.register({
       const { data } = await freshData(cfg, now, true, SETTINGS.buttonBudgetMs, SETTINGS.widgetRequestMs)
       await tryUpdateNotifications(cfg, data.sched, now, date, 3000)
     }
+    Widget.reloadAll()
+  },
+})
+
+export const DayIntent = AppIntentManager.register({
+  name: "DayIntent",
+  protocol: AppIntentProtocol.AppIntent,
+  perform: async ({ tomorrow }: { tomorrow: boolean }) => {
+    writeDay(tomorrow === true, kyivParts(new Date()))
     Widget.reloadAll()
   },
 })

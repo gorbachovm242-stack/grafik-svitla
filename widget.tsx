@@ -1,20 +1,25 @@
 // Віджет: бере графік (кеш 10 хвилин), оновлює сповіщення й малює потрібний розмір.
 // Після Widget.present() скрипт одразу зупиняється, тому все робимо до нього.
 import { Widget, VStack, Text } from "scripting"
-import { SETTINGS, buildView, kyivParts, refreshDate } from "./logic"
-import { freshData, readConfig } from "./store"
+import { SETTINGS, buildView, dayMode, kyivParts, tomorrowShown, widgetReloadDate } from "./logic"
+import { readConfig, readDay, widgetData } from "./store"
 import { tryUpdateNotifications } from "./notifications"
 import { WidgetContent } from "./widget_view"
 
 async function main() {
   const cfg = readConfig()
-  // Графік і датчик СвітлоБота паралельно й не довше за SETTINGS.widgetBudgetMs: без інтернету віджет
+  const started = new Date()
+  const mode = dayMode(readDay(), kyivParts(started), started.getTime())
+  // Щойно натиснули «Завтра ›» чи «‹ Сьогодні»: малюємо збережене одразу, а мережу лишаємо плановому оновленню.
+  // Інакше графік і датчик СвітлоБота паралельно й не довше за SETTINGS.widgetBudgetMs: без інтернету віджет
   // малює збережене, а не чекає, доки iOS його зупинить і він лишиться старим.
-  const { data, fact } = await freshData(cfg, kyivParts(new Date()), false, SETTINGS.widgetBudgetMs, SETTINGS.widgetRequestMs)
+  const { data, fact } = await widgetData(cfg, kyivParts(started), mode.quick)
   const date = new Date()
   const now = kyivParts(date)
   const view = buildView(cfg, { ...data, fact }, now)
-  if (cfg) await tryUpdateNotifications(cfg, data.sched, now, date, 3000)
+  if (cfg && !mode.quick) await tryUpdateNotifications(cfg, data.sched, now, date, 3000)
+  const family = Widget.family
+  const tomorrow = tomorrowShown(mode, view, family)
   const size = Widget.displaySize
   // Прозорий фон: імітація з налаштувань віджета або віджет Scripting із прозорим чи розмитим тлом.
   const transparent = !!(Widget.isTransparentBackground || Widget.isTransparentMode || Widget.isBlurMode)
@@ -23,12 +28,14 @@ async function main() {
       view={view}
       now={now}
       date={date}
-      family={Widget.family}
+      family={family}
       width={size.width}
       height={size.height}
       transparent={transparent}
+      tomorrow={tomorrow}
     />,
-    { reloadPolicy: { policy: "after", date: refreshDate(view, now, date) } }
+    // Завтра віджет показує недовго: просимо iOS повернути сьогоднішній день, щойно мине SETTINGS.tomorrowHoldMinutes.
+    { reloadPolicy: { policy: "after", date: widgetReloadDate(view, now, date, mode, tomorrow) } }
   )
 }
 

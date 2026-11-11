@@ -19,6 +19,9 @@ export const SETTINGS = {
   factCacheMinutes: 4, // датчик СвітлоБота не перепитувати частіше
   factRefreshMinutes: 15, // з датчиком віджет просить оновлення частіше
   factStaleMinutes: 60, // старіші дані датчика позначаємо часом перевірки
+  // Кнопка «Завтра ›» у малому й середньому віджеті: скільки показувати завтра, перш ніж віджет сам повернеться на сьогодні.
+  tomorrowHoldMinutes: 3,
+  dayTapQuickSeconds: 20, // одразу після натискання «Завтра ›» чи «‹ Сьогодні» віджет малює збережене, без мережі
 }
 
 export const URLS = {
@@ -554,6 +557,64 @@ export function batteryLevel(view: View): number {
 export function captionText(view: View): string {
   const group = view.group ? `Черга ${view.group}` : "Графік світла"
   return view.kind === "on" || view.kind === "off" || view.kind === "maybe" ? `${group} · за графіком` : group
+}
+
+// ---------- Сьогодні чи завтра ----------
+// Малий і середній віджет кнопкою «Завтра ›» показують графік на завтра. Вибір зберігається разом із часом натискання.
+
+export type DayChoice = { tomorrow: boolean; at: number; ymd: string }
+export type DayMode = { tomorrow: boolean; until: number | null; quick: boolean }
+
+// Завтра показуємо лише того самого дня й не довше за SETTINGS.tomorrowHoldMinutes: опівночі «завтра» стає «сьогодні»,
+// а забутий перемикач не ховає поточний стан надовго. quick: натискання щойно було, тож малюємо без мережі.
+export function dayMode(choice: DayChoice | null, now: Now, nowMs: number): DayMode {
+  if (!choice || typeof choice.at !== "number") return { tomorrow: false, until: null, quick: false }
+  const age = nowMs - choice.at
+  const quick = age >= 0 && age < SETTINGS.dayTapQuickSeconds * 1000
+  const until = choice.at + SETTINGS.tomorrowHoldMinutes * 60000
+  const tomorrow = choice.tomorrow === true && choice.ymd === now.ymd && age >= 0 && nowMs < until
+  return { tomorrow, until: tomorrow ? until : null, quick }
+}
+
+// Графік на завтра вже опубліковано: тоді й зʼявляється «Завтра ›».
+export function hasTomorrow(view: View): boolean {
+  return view.tomorrowRuns !== null
+}
+
+// Завтра показують лише малий і середній віджет: великий і так має обидва дні, а на екрані блокування кнопок немає.
+export function tomorrowShown(mode: DayMode, view: View, family: string): boolean {
+  return mode.tomorrow && hasTomorrow(view) && (family === "systemSmall" || family === "systemMedium")
+}
+
+// Коли перемалювати віджет: як завжди, а коли показано завтра, ще й щойно мине SETTINGS.tomorrowHoldMinutes,
+// щоб віджет сам повернувся на сьогодні.
+export function widgetReloadDate(view: View, now: Now, date: Date, mode: DayMode, tomorrow: boolean): Date {
+  const next = refreshDate(view, now, date).getTime()
+  return new Date(tomorrow && mode.until !== null ? Math.min(next, mode.until + 1000) : next)
+}
+
+// «1 відключення», «3 відключення», «5 відключень».
+export function outagesWord(n: number): string {
+  const one = n % 10 === 1 && n % 100 !== 11
+  const few = n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14)
+  return one || few ? "відключення" : "відключень"
+}
+
+// «3 відключення · 9 год», «Без відключень».
+export function tomorrowSummary(view: View): string {
+  if (!view.tomorrowRuns) return "Графіка ще немає"
+  const windows = view.tomorrowWindows || []
+  if (!windows.length) return "Без відключень"
+  const total = windows.reduce((sum, w) => sum + (w.e - w.s), 0)
+  return `${windows.length} ${outagesWord(windows.length)} · ${durationText(total)}`
+}
+
+const MONTH_NAMES = ["січня", "лютого", "березня", "квітня", "травня", "червня", "липня", "серпня", "вересня", "жовтня", "листопада", "грудня"]
+
+// «12 листопада».
+export function dateWords(ymd: string): string {
+  const [, m, d] = ymd.split("-").map(Number)
+  return `${d} ${MONTH_NAMES[m - 1]}`
 }
 
 // Коли iOS варто знову намалювати віджет: за 10 секунд після зміни стану, а між змінами раз на 30 хвилин

@@ -3,13 +3,13 @@ import { VStack, HStack, ZStack, Spacer, Text, Image, Button, TimerIntervalLabel
 import type { Color, FontWeight, TextAlignment, VirtualNode, WidgetFamily } from "scripting"
 import type { Now, Run, View } from "./logic"
 import {
-  DEFAULT_LOOK, bulbState, captionText, changeDate, changeVerb, hasTimer, hm, isCharging, lockLine, lockLookOf, lockTitle,
-  lockVerb, lookOf, quietWords, windowText,
+  DEFAULT_LOOK, addDays, bulbState, captionText, changeDate, changeVerb, dateWords, hasTimer, hasTomorrow, hm, isCharging, lockLine,
+  lockLookOf, lockTitle, lockVerb, lookOf, quietWords, tomorrowSummary, windowText,
 } from "./logic"
 import { Battery, DayLook, Garland, House, PICTURES, Ring, Tiles } from "./looks"
 import type { Theme } from "./theme"
 import { CLEAR_THEME, LOCK_PAINT, LOCK_RING, homePaint, themeFor } from "./theme"
-import { RefreshIntent } from "./app_intents"
+import { DayIntent, RefreshIntent } from "./app_intents"
 
 export type Ctx = { view: View; now: Now; date: Date; theme: Theme; width: number; height: number }
 
@@ -63,6 +63,26 @@ function Refresh({ color, size = 22 }: { color: Color; size?: number }) {
       <Image systemName="arrow.clockwise" font={size * 0.52} fontWeight="semibold" foregroundStyle={color} frame={{ width: size, height: size }} />
     </Button>
   )
+}
+
+// Перемикач дня в малому й середньому віджеті: «Завтра ›» і «‹ Сьогодні».
+function DayChip({ c, tomorrow, size = 11 }: { c: Ctx; tomorrow: boolean; size?: number }) {
+  const color = c.theme.accent
+  const label = <Label text={tomorrow ? "Завтра" : "Сьогодні"} size={size} weight="semibold" color={color} scale={0.8} />
+  const chevron = <Image systemName={tomorrow ? "chevron.right" : "chevron.left"} font={Math.round(size * 0.75)} fontWeight="bold" foregroundStyle={color} />
+  return (
+    <Button intent={DayIntent({ tomorrow })} buttonStyle="plain">
+      <HStack spacing={2} padding={{ top: 2, bottom: 2, leading: 6, trailing: 6 }} background={{ style: { color, opacity: 0.15 }, shape: "capsule" }}>
+        {tomorrow ? label : chevron}
+        {tomorrow ? chevron : label}
+      </HStack>
+    </Button>
+  )
+}
+
+// «Завтра ›» лише тоді, коли графік на завтра вже опубліковано.
+function tomorrowChip(c: Ctx): VirtualNode | null {
+  return hasTomorrow(c.view) ? <DayChip c={c} tomorrow /> : null
 }
 
 function statusColor(kind: string, theme: Theme): Color {
@@ -181,8 +201,8 @@ function BatteryDial({ c, width, height }: { c: Ctx; width: number; height: numb
   )
 }
 
-// Написи всередині кільця: дія, час і таймер або короткі слова.
-function DialText({ c, unit, withTimer }: { c: Ctx; unit: number; withTimer: boolean }) {
+// Написи всередині кільця: дія, час і таймер або короткі слова. chip: «Завтра ›» під ними.
+function DialText({ c, unit, withTimer, chip = null }: { c: Ctx; unit: number; withTimer: boolean; chip?: VirtualNode | null }) {
   const { view, theme } = c
   const footer = view.noticeShort ? (
     <Label text={view.noticeShort} size={11 * unit} weight="medium" color={theme.warn} align="center" />
@@ -191,11 +211,13 @@ function DialText({ c, unit, withTimer }: { c: Ctx; unit: number; withTimer: boo
   ) : (
     <Label text={`черга ${view.group}`} size={11 * unit} weight="medium" color={theme.muted} align="center" />
   )
+  const below = chip ? <VStack spacing={0} padding={{ top: 3 }}>{chip}</VStack> : null
   if (view.changeMin === null) {
     return (
       <VStack spacing={2}>
         <Label text={quietWords(view)} size={13 * unit} weight="semibold" color={theme.text} lines={2} align="center" />
         {footer}
+        {below}
       </VStack>
     )
   }
@@ -204,6 +226,7 @@ function DialText({ c, unit, withTimer }: { c: Ctx; unit: number; withTimer: boo
       <Label text={changeVerb(view)} size={11 * unit} weight="medium" color={theme.muted} align="center" />
       <Label text={view.short} size={26 * unit} weight="bold" rounded color={timeColor(c)} />
       {footer}
+      {below}
     </VStack>
   )
 }
@@ -270,6 +293,7 @@ function ChangeColumn({ c }: { c: Ctx }) {
         </VStack>
       )}
       <Spacer minLength={3} />
+      {tomorrowChip(c)}
       <HStack spacing={2}>
         {view.fact ? <FactDot c={c} /> : <Footer c={c} />}
         <Spacer minLength={0} />
@@ -292,6 +316,7 @@ function SmallHouse({ c }: { c: Ctx }) {
 // Верхні два рядки малого віджета, коли малюнок займає нижню половину.
 function Headline({ c }: { c: Ctx }) {
   const { view, theme } = c
+  const chip = tomorrowChip(c)
   if (view.changeMin === null) {
     return (
       <VStack alignment="leading" spacing={1}>
@@ -301,16 +326,22 @@ function Headline({ c }: { c: Ctx }) {
           <FactDot c={c} />
           <Refresh color={theme.muted} size={20} />
         </HStack>
-        <Label text={view.noticeShort || view.sub} size={12} weight="medium" color={view.noticeShort ? theme.warn : theme.muted} lines={2} scale={0.8} />
+        <HStack spacing={2}>
+          <Label text={view.noticeShort || view.sub} size={12} weight="medium" color={view.noticeShort ? theme.warn : theme.muted} lines={2} scale={0.8} />
+          {chip ? <Spacer minLength={2} /> : null}
+          {chip}
+        </HStack>
       </VStack>
     )
   }
+  // Поруч із великим часом місця мало: «Завтра ›» стає замість номера черги, але попередження (аварійні,
+  // старі дані) важливіше за нього.
   return (
     <VStack alignment="leading" spacing={0}>
       <HStack spacing={2}>
         <Label text={changeVerb(view)} size={13} weight="medium" color={theme.muted} />
         <Spacer minLength={2} />
-        <Footer c={c} />
+        {chip && !view.noticeShort ? chip : <Footer c={c} />}
         <FactDot c={c} />
         <Refresh color={theme.muted} size={20} />
       </HStack>
@@ -343,6 +374,7 @@ function SmallBattery({ c }: { c: Ctx }) {
       <Spacer minLength={0} />
       <BatteryDial c={c} width={c.width - 28} height={Math.round((c.width - 28) * 0.54)} />
       {view.changeMin !== null ? <Label text={`${changeVerb(view)} ${view.short}`} size={15} weight="semibold" color={theme.text} /> : null}
+      {tomorrowChip(c)}
       <HStack spacing={4}>
         {view.fact ? <FactLine c={c} compact /> : <Footer c={c} />}
         <Refresh color={theme.muted} size={20} />
@@ -357,7 +389,7 @@ function SmallRing({ c }: { c: Ctx }) {
   return (
     <ZStack alignment="topTrailing" frame={fill}>
       <ZStack frame={fill}>
-        <RingDial c={c} size={size} runs={c.view.todayRuns} nowMin={c.view.nowMin} center={<DialText c={c} unit={size / 138} withTimer />} />
+        <RingDial c={c} size={size} runs={c.view.todayRuns} nowMin={c.view.nowMin} center={<DialText c={c} unit={size / 138} withTimer chip={tomorrowChip(c)} />} />
       </ZStack>
       <VStack spacing={2}>
         <Refresh color={c.theme.muted} size={24} />
@@ -404,13 +436,120 @@ function Medium({ c, look }: { c: Ctx; look: string }) {
       <VStack alignment="leading" spacing={0} frame={{ maxWidth: "infinity", alignment: "leading" }}>
         <Status c={c} withTimer={look !== "battery"} />
         <Spacer minLength={6} />
-        <Label text={list.heading} size={11} weight="semibold" color={theme.muted} />
+        <HStack spacing={4}>
+          <Label text={list.heading} size={11} weight="semibold" color={theme.muted} />
+          <Spacer minLength={0} />
+          {tomorrowChip(c)}
+        </HStack>
         <Label text={list.text} size={13} weight="medium" color={theme.text} lines={2} scale={0.75} />
         <Spacer minLength={3} />
         <HStack spacing={2}>
           {view.fact ? <FactLine c={c} /> : <Checked c={c} />}
           <Spacer minLength={0} />
           <Refresh color={theme.muted} />
+        </HStack>
+      </VStack>
+    </HStack>
+  )
+}
+
+// ---------- Завтра: малий і середній віджет після «Завтра ›» ----------
+// Малюнок завтрашнього дня без рамки «зараз» і години відключень. Батарея показує лише поточний відрізок,
+// тож для завтра замість неї плитки.
+
+function tomorrowLook(look: string): string {
+  return look === "battery" ? "tiles" : look
+}
+
+// Години відключень завтра: «06:00–09:00, 15:00–18:00», понад max: «ще 2».
+function tomorrowHours(view: View, max: number, sep: string): string {
+  const windows = view.tomorrowWindows || []
+  if (!windows.length) return tomorrowSummary(view)
+  const shown = windows.slice(0, max).map(windowText)
+  if (windows.length > max) shown.push(`ще ${windows.length - max}`)
+  return shown.join(sep)
+}
+
+function SmallTomorrow({ c, look }: { c: Ctx; look: string }) {
+  const { view, theme } = c
+  const runs = view.tomorrowRuns || []
+  const pic = tomorrowLook(look)
+  const back = <DayChip c={c} tomorrow={false} />
+  if (pic === "ring") {
+    const size = Math.min(138, c.width - 20)
+    const unit = size / 138
+    const center = (
+      <VStack spacing={1}>
+        <Label text="Завтра" size={12 * unit} weight="semibold" color={theme.accent} />
+        <TomorrowText c={c} unit={unit} />
+        <VStack spacing={0} padding={{ top: 3 }}>{back}</VStack>
+      </VStack>
+    )
+    return (
+      <ZStack frame={fill}>
+        <RingDial c={c} size={size} runs={runs} nowMin={null} center={center} />
+      </ZStack>
+    )
+  }
+  if (pic === "house") {
+    const height = Math.min(136, c.height - 22)
+    return (
+      <HStack spacing={6} padding={{ leading: 8, trailing: 8, top: 11, bottom: 11 }} frame={fill}>
+        <House width={Math.round(height * 0.545)} height={height} runs={runs} nowMin={null} paint={homePaint("house", theme)} />
+        <VStack alignment="leading" spacing={2}>
+          <Label text="Завтра" size={15} weight="bold" color={theme.text} />
+          <Label text={tomorrowHours(view, 4, "\n")} size={12} weight="medium" color={theme.text} lines={5} scale={0.75} />
+          <Spacer minLength={2} />
+          {back}
+        </VStack>
+      </HStack>
+    )
+  }
+  const width = c.width - 26
+  return (
+    <VStack alignment="leading" spacing={0} padding={{ top: 12, leading: 13, bottom: 10, trailing: 13 }} frame={{ ...fill, alignment: "topLeading" }}>
+      <HStack spacing={2}>
+        <Label text="Завтра" size={18} weight="bold" color={theme.text} />
+        <Spacer minLength={2} />
+        {back}
+      </HStack>
+      <Label text={tomorrowHours(view, 3, ", ")} size={12} weight="medium" color={theme.muted} lines={2} scale={0.75} />
+      <Spacer minLength={4} />
+      <Centered>
+        <DayLook look={pic} width={width} height={Math.round(width * 0.56)} runs={runs} nowMin={null} paint={homePaint(pic, theme)} />
+      </Centered>
+    </VStack>
+  )
+}
+
+function MediumTomorrow({ c, look }: { c: Ctx; look: string }) {
+  const { view, theme } = c
+  const runs = view.tomorrowRuns || []
+  const pic = tomorrowLook(look)
+  let picture: VirtualNode
+  if (pic === "ring") {
+    picture = <RingDial c={c} size={134} runs={runs} nowMin={null} center={<TomorrowText c={c} unit={134 / 130} />} />
+  } else {
+    const [width, height] = PICTURES.medium[pic]
+    picture = <DayLook look={pic} width={width} height={height} runs={runs} nowMin={null} paint={homePaint(pic, theme)} />
+  }
+  const windows = view.tomorrowWindows || []
+  return (
+    <HStack spacing={12} padding={{ top: 10, leading: 12, bottom: 10, trailing: 12 }} frame={fill}>
+      {picture}
+      <VStack alignment="leading" spacing={0} frame={{ maxWidth: "infinity", alignment: "leading" }}>
+        <HStack spacing={4}>
+          <Image systemName="calendar" font={14} fontWeight="semibold" foregroundStyle={theme.accent} />
+          <Label text="Завтра" size={18} weight="bold" color={theme.text} />
+        </HStack>
+        <Label text={dateWords(addDays(c.now.ymd, 1))} size={13} weight="medium" color={theme.text} />
+        <Spacer minLength={6} />
+        <Label text={tomorrowSummary(view)} size={11} weight="semibold" color={theme.muted} />
+        {windows.length ? <Label text={tomorrowHours(view, 4, ", ")} size={13} weight="medium" color={theme.text} lines={2} scale={0.75} /> : null}
+        <Spacer minLength={3} />
+        <HStack spacing={2}>
+          <DayChip c={c} tomorrow={false} />
+          <Spacer minLength={0} />
         </HStack>
       </VStack>
     </HStack>
@@ -630,9 +769,10 @@ function Inline({ view }: { view: View }) {
 
 // transparent: у налаштуваннях віджета ввімкнено прозорий фон (або це віджет із прозорим чи розмитим тлом).
 // Тоді свого фону не малюємо зовсім, а текст світлий із тінню, щоб читався поверх шпалер.
+// tomorrow: натиснуто «Завтра ›», і малий чи середній віджет показує графік на завтра.
 export function WidgetContent({
-  view, now, date, family, width, height, transparent = false,
-}: { view: View; now: Now; date: Date; family: WidgetFamily; width: number; height: number; transparent?: boolean }) {
+  view, now, date, family, width, height, transparent = false, tomorrow = false,
+}: { view: View; now: Now; date: Date; family: WidgetFamily; width: number; height: number; transparent?: boolean; tomorrow?: boolean }) {
   const theme = transparent ? CLEAR_THEME : themeFor(view)
   const c: Ctx = { view, now, date, theme, width, height }
   if (family === "accessoryInline") return <Inline view={view} />
@@ -640,9 +780,10 @@ export function WidgetContent({
   if (family === "accessoryCircular") return <Circular c={c} look={lockLook} />
   if (family === "accessoryRectangular") return <Rectangular c={c} look={lockLook} />
   const look = lookOf(view.look, DEFAULT_LOOK)
+  const day = tomorrow && hasTomorrow(view)
   let content: VirtualNode
-  if (family === "systemSmall") content = <Small c={c} look={look} />
-  else if (family === "systemMedium") content = <Medium c={c} look={look} />
+  if (family === "systemSmall") content = day ? <SmallTomorrow c={c} look={look} /> : <Small c={c} look={look} />
+  else if (family === "systemMedium") content = day ? <MediumTomorrow c={c} look={look} /> : <Medium c={c} look={look} />
   else content = <Large c={c} look={look} />
   if (transparent) {
     return (

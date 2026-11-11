@@ -1,5 +1,5 @@
 // Налаштування, кеш графіка й завантаження з мережі. Сховище спільне для застосунку, віджета й кнопки «↻».
-import type { Channel, Config, Data, Fact, Now, Sched, Region } from "./logic"
+import type { Channel, Config, Data, DayChoice, Fact, Now, Sched, Region } from "./logic"
 import {
   SETTINGS, SVITLOBOT, channelId, fetchSchedule, findChannel, groupsFor, mergeFact, parseChannels, parseStatusPosts, postsFact,
   queueFact, queueId,
@@ -10,6 +10,16 @@ const CACHE_KEY = "cache"
 const FACT_KEY = "fact"
 const NONE_KEY = "factNone"
 const OFFLINE_KEY = "offline"
+const DAY_KEY = "day"
+
+// Що показують малий і середній віджет: сьогодні чи завтра (кнопки «Завтра ›» і «‹ Сьогодні»).
+export function readDay(): DayChoice | null {
+  return Storage.get<DayChoice>(DAY_KEY)
+}
+
+export function writeDay(tomorrow: boolean, now: Now, nowMs: number = Date.now()): void {
+  Storage.set(DAY_KEY, { tomorrow, at: nowMs, ymd: now.ymd })
+}
 
 export function readConfig(): Config | null {
   const cfg = Storage.get<Config>(CONFIG_KEY)
@@ -161,6 +171,13 @@ export async function freshData(cfg: Config | null, now: Now, force: boolean, bu
     if (timer !== undefined) clearTimeout(timer)
     net.stop()
   }
+}
+
+// Дані для віджета. Щойно натиснули «Завтра ›» чи «‹ Сьогодні» (quick): лише збережене, без мережі, щоб день
+// перемикався одразу. Свіже підтягне планове оновлення.
+export function widgetData(cfg: Config | null, now: Now, quick: boolean): Promise<Fresh> {
+  if (quick) return Promise.resolve({ data: cachedData(cfg), fact: cachedFact(cfg) })
+  return freshData(cfg, now, false, SETTINGS.widgetBudgetMs, SETTINGS.widgetRequestMs)
 }
 
 export function loadGroups(region: Region): Promise<string[]> {
