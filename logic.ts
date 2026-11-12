@@ -91,6 +91,43 @@ export type Config = {
   lockLook?: string
   svitlobot?: string // канал датчика СвітлоБота: чи є світло насправді
   svitlobotName?: string // його назва-адреса для налаштувань
+  name?: string // назва першої адреси, коли адрес дві («Дім»)
+  second?: Address | null // друга адреса: батьки, робота, дача
+  // Лише в памʼяті, не зберігаються: яка це адреса (0 перша, 1 друга) і її назва, коли адрес дві.
+  slot?: number
+  place?: string
+}
+
+// Друга адреса: своя область і черга, а сповіщення, вигляд і фон спільні з першою.
+export type Address = { name?: string; region: string; group: string }
+
+export const FIRST_NAME = "Дім"
+export const SECOND_NAME = "Друга адреса"
+
+export function hasSecond(cfg: Config | null | undefined): boolean {
+  return !!(cfg && cfg.second && cfg.second.region && cfg.second.group)
+}
+
+// Адреси з налаштувань: перша завжди, друга, якщо задана. Кожна стає окремим Config зі своєю чергою,
+// тож графік, датчик, кеш і віджет працюють для неї так само, як для першої. Власний датчик СвітлоБота
+// буває лише в першої адреси, друга бере факт за датчиками своєї черги.
+export function addressesOf(cfg: Config | null | undefined): Config[] {
+  if (!cfg) return []
+  if (!hasSecond(cfg)) return [{ ...cfg, slot: 0 }]
+  const second = cfg.second as Address
+  const two: Config = { ...cfg, region: second.region, group: second.group, slot: 1, place: second.name || SECOND_NAME }
+  delete two.svitlobot
+  delete two.svitlobotName
+  return [{ ...cfg, slot: 0, place: cfg.name || FIRST_NAME }, two]
+}
+
+// Яку адресу показує віджет: у полі Parameter налаштувань віджета «2», «друга» чи назва другої адреси — другу.
+export function slotFromParameter(parameter: string | null | undefined, cfg: Config | null | undefined): number {
+  if (!cfg || !hasSecond(cfg)) return 0
+  const p = String(parameter || "").trim().toLowerCase()
+  if (!p) return 0
+  const name = String(cfg.second?.name || "").trim().toLowerCase()
+  return p === "2" || p.startsWith("друг") || (!!name && p === name) ? 1 : 0
 }
 
 export function notifyPrefs(cfg: Config): { change: boolean; off: boolean; on: boolean } {
@@ -122,6 +159,7 @@ export type View = {
   stale: boolean
   checked: number | null
   fact: FactView | null // що каже датчик СвітлоБота, якщо його обрано
+  place: string | null // назва адреси («Дім», «Батьки»), коли адрес дві
 }
 
 // ---------- Час ----------
@@ -425,7 +463,7 @@ export function buildView(cfg: Config | null, data: Data, now: Now, nowMs: numbe
     style: cfg && cfg.style ? cfg.style : null, look: cfg && cfg.look ? cfg.look : null, lockLook: cfg && cfg.lockLook ? cfg.lockLook : null,
     nowMin: now.min, todayRuns: [], todayWindows: [], windowsLeft: [], tomorrowRuns: null, tomorrowWindows: null,
     runFrom: null, changeMin: null, short: "—", notice: null, noticeShort: null, stale: false, checked: null,
-    fact: cfg ? factView(data.fact, now, nowMs) : null,
+    fact: cfg ? factView(data.fact, now, nowMs) : null, place: cfg && cfg.place ? cfg.place : null,
   }
   if (!cfg) return view
 
@@ -555,8 +593,13 @@ export function batteryLevel(view: View): number {
 }
 
 export function captionText(view: View): string {
-  const group = view.group ? `Черга ${view.group}` : "Графік світла"
+  const group = view.group ? (view.place ? `${view.place} · черга ${view.group}` : `Черга ${view.group}`) : "Графік світла"
   return view.kind === "on" || view.kind === "off" || view.kind === "maybe" ? `${group} · за графіком` : group
+}
+
+// Хто це: «Черга 3.2», а коли адрес дві, «Батьки, черга 3.2». Для сповіщень.
+export function queueLabel(group: string, place?: string | null): string {
+  return place ? `${place}, черга ${group}` : `Черга ${group}`
 }
 
 // ---------- Сьогодні чи завтра ----------
@@ -737,8 +780,12 @@ export function noticeWhen(min: number, triggerMin: number): string {
   return t === 0 ? "опівночі" : `завтра ${at(t)}`
 }
 
-export function plannedNotifications(sched: Sched, now: Now, group: string, prefs: { off: boolean; on: boolean }): Planned[] {
+// place: назва адреси, коли їх дві; тоді текст починається з «Батьки, черга 3.2».
+export function plannedNotifications(
+  sched: Sched, now: Now, group: string, prefs: { off: boolean; on: boolean }, place?: string | null,
+): Planned[] {
   const lead = SETTINGS.noticeMinutes
+  const who = queueLabel(group, place)
   const items: Planned[] = []
   for (const outage of outagesOf(sched, now)) {
     const startAt = outage.s - lead
@@ -749,7 +796,7 @@ export function plannedNotifications(sched: Sched, now: Now, group: string, pref
         kind: "off",
         triggerMin: startAt,
         title: outage.maybe ? `Через ${lead} хв можливе відключення` : `Через ${lead} хв вимкнуть світло`,
-        body: `Черга ${group}: ${outage.maybe ? "можливе відключення" : "відключення"} ${noticeWhen(outage.s, startAt)}${until}`,
+        body: `${who}: ${outage.maybe ? "можливе відключення" : "відключення"} ${noticeWhen(outage.s, startAt)}${until}`,
       })
     }
     const endAt = outage.e - lead
@@ -759,7 +806,7 @@ export function plannedNotifications(sched: Sched, now: Now, group: string, pref
         kind: "on",
         triggerMin: endAt,
         title: `Через ${lead} хв увімкнуть світло`,
-        body: `Черга ${group}: світло ${noticeWhen(outage.e, endAt)}`,
+        body: `${who}: світло ${noticeWhen(outage.e, endAt)}`,
       })
     }
   }
@@ -802,7 +849,7 @@ export function scheduleChanges(prev: Known | null, next: Known, now: Now): Chan
   return changes
 }
 
-export function changeMessage(changes: Change[], now: Now, group: string): { title: string; body: string } | null {
+export function changeMessage(changes: Change[], now: Now, group: string, place?: string | null): { title: string; body: string } | null {
   if (!changes.length) return null
   const onlyNew = changes.every((c) => c.isNew)
   const parts = changes.map((c) => {
@@ -812,7 +859,7 @@ export function changeMessage(changes: Change[], now: Now, group: string): { tit
   })
   return {
     title: onlyNew ? "Новий графік відключень" : "Графік відключень змінився",
-    body: `Черга ${group}, ${parts.join("; ")}`,
+    body: `${queueLabel(group, place)}, ${parts.join("; ")}`,
   }
 }
 

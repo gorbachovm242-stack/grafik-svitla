@@ -4,15 +4,16 @@ import {
 } from "scripting"
 import type { WidgetFamily } from "scripting"
 import type { Channel, Config, Data, Fact, FactStatus } from "./logic"
+import type { View } from "./logic"
 import {
-  DEFAULT_LOOK, LOCK_LOOKS, LOOKS, REGIONS, SETTINGS, SVITLOBOT, URLS, buildView, channelId, hm, kyivParts, lockLookOf, lookOf,
-  notifyPrefs, regionById, searchChannels, windowText,
+  DEFAULT_LOOK, FIRST_NAME, LOCK_LOOKS, LOOKS, REGIONS, SECOND_NAME, SETTINGS, SVITLOBOT, URLS, addressesOf, buildView, channelId, hm,
+  kyivParts, lockLookOf, lookOf, notifyPrefs, regionById, searchChannels, windowText,
 } from "./logic"
 import { STYLES, styleOf } from "./theme"
 import {
-  cachedData, cachedFact, clearCache, freshData, getFact, loadChannels, loadGroups, readConfig, writeConfig,
+  cachedData, cachedFact, clearCache, freshAll, getFact, loadChannels, loadGroups, readConfig, writeConfig,
 } from "./store"
-import { resetNotifications, tryUpdateNotifications } from "./notifications"
+import { forgetSecond, resetNotifications, tryUpdateNotifications } from "./notifications"
 
 const HOW_TO_ADD =
   "Робочий екран: утримуйте порожнє місце, натисніть «Редагувати» → «Додати віджет», знайдіть Scripting, оберіть розмір і додайте. " +
@@ -26,6 +27,21 @@ const NO_SENSORS =
   "У вашій черзі поки немає датчиків СвітлоБота. Знайдіть датчик свого будинку чи сусідів за вулицею, вставте посилання на канал або поставте свій."
 
 const MARKS: Record<FactStatus, string> = { on: "🟢", off: "🔴", unknown: "⚪️" }
+
+const SECOND_ABOUT = "Батьки, робота чи дача: віджет і попередження ще для однієї черги. Оберіть область і чергу."
+const SECOND_WIDGET =
+  "Щоб віджет показував другу адресу: утримуйте віджет → «Змінити віджет» → у полі Parameter напишіть 2. " +
+  "Попередження приходять про обидві адреси, з назвою на початку."
+
+function daysLine(view: View, today: boolean): string {
+  if (today) return `Сьогодні: ${view.todayWindows.length ? view.todayWindows.map(windowText).join(", ") : "без відключень"}`
+  return `Завтра: ${view.tomorrowRuns ? (view.tomorrowWindows || []).map(windowText).join(", ") || "без відключень" : "графіка ще немає"}`
+}
+
+// Друга адреса бере сховище поруч із першою: її дані окремо, щоб сторінка показала їх ще до мережі.
+function secondOf(cfg: Config | null): Config | null {
+  return addressesOf(cfg)[1] ?? null
+}
 
 const PREVIEWS: [WidgetFamily, string][] = [
   ["systemSmall", "Малий"],
@@ -47,17 +63,27 @@ function App() {
   const [query, setQuery] = useState("")
   const [channels, setChannels] = useState<Channel[] | null>(null)
   const [channelsError, setChannelsError] = useState<string | null>(null)
+  // Друга адреса.
+  const [data2, setData2] = useState<Data>(cachedData(secondOf(readConfig())))
+  const [fact2, setFact2] = useState<Fact | null>(cachedFact(secondOf(readConfig())))
+  const [region2, setRegion2] = useState<string>(readConfig()?.second?.region ?? readConfig()?.region ?? "zaporizhzhia")
+  const [groups2, setGroups2] = useState<string[]>([])
+  const [groups2Error, setGroups2Error] = useState<string | null>(null)
+  const [name2, setName2] = useState<string>(readConfig()?.second?.name ?? "")
 
   async function refresh(next: Config | null, force: boolean) {
     if (!next) return
     setLoading(true)
     const date = new Date()
     const now = kyivParts(date)
-    const { data: fresh, fact: sensor } = await freshData(next, now, force, SETTINGS.appBudgetMs, SETTINGS.timeoutSeconds * 1000)
-    setData(fresh)
-    setFact(sensor)
+    // Обидві адреси разом: сповіщення про обидві.
+    const all = await freshAll(next, now, force, SETTINGS.appBudgetMs, SETTINGS.timeoutSeconds * 1000)
+    setData(all[0].data)
+    setFact(all[0].fact)
     setFactLoaded(true)
-    await tryUpdateNotifications(next, fresh.sched, now, date, 4000)
+    setData2(all[1] ? all[1].data : { sched: null, status: "ok" })
+    setFact2(all[1] ? all[1].fact : null)
+    await tryUpdateNotifications(next, all.map((f) => f.data.sched), now, date, 4000)
     setLoading(false)
     Widget.reloadAll()
   }
@@ -112,6 +138,61 @@ function App() {
       })
   }, [region])
 
+  useEffect(() => {
+    const found = regionById(region2)
+    if (!found) return
+    setGroups2Error(null)
+    loadGroups(found)
+      .then((list) => {
+        setGroups2(list)
+        if (!list.length) setGroups2Error("Для цього регіону зараз немає списку черг.")
+      })
+      .catch(() => {
+        setGroups2([])
+        setGroups2Error("Не вдалося завантажити список черг. Перевірте інтернет.")
+      })
+  }, [region2])
+
+  // Друга адреса зберігається, щойно обрали чергу. Її кеш і памʼять про графік починаються з нуля.
+  async function chooseSecondGroup(group: string) {
+    if (!cfg) return
+    const next: Config = { ...cfg, second: { name: name2.trim() || SECOND_NAME, region: region2, group } }
+    writeConfig(next)
+    setCfg(next)
+    clearCache(1)
+    forgetSecond()
+    await refresh(next, true)
+  }
+
+  function renameSecond(value: string) {
+    setName2(value)
+    if (!cfg || !cfg.second) return
+    const next: Config = { ...cfg, second: { ...cfg.second, name: value.trim() || SECOND_NAME } }
+    writeConfig(next)
+    setCfg(next)
+  }
+
+  function renameFirst(value: string) {
+    if (!cfg) return
+    const next: Config = { ...cfg, name: value.trim() || undefined }
+    writeConfig(next)
+    setCfg(next)
+  }
+
+  async function removeSecond() {
+    if (!cfg) return
+    const next: Config = { ...cfg }
+    delete next.second
+    writeConfig(next)
+    setCfg(next)
+    clearCache(1)
+    forgetSecond()
+    setName2("")
+    setData2({ sched: null, status: "ok" })
+    setFact2(null)
+    await refresh(next, false)
+  }
+
   // Нова черга: старий кеш і памʼять про графік для сповіщень уже не годяться.
   async function chooseGroup(group: string) {
     const next: Config = { ...(cfg ?? {}), region, group }
@@ -128,12 +209,14 @@ function App() {
     writeConfig(next)
     setCfg(next)
     const date = new Date()
-    await tryUpdateNotifications(next, data.sched, kyivParts(date), date, 4000)
+    await tryUpdateNotifications(next, [data.sched, data2.sched], kyivParts(date), date, 4000)
     Widget.reloadAll()
   }
 
   const now = kyivParts(new Date())
   const view = buildView(cfg, { ...data, fact }, now)
+  const second = secondOf(cfg)
+  const view2 = buildView(second, { ...data2, fact: fact2 }, now)
   const found = channels && query.trim() ? searchChannels(channels, query) : []
   // Новий канал зʼявляється в пошуку лише після модерації СвітлоБота (кілька днів), а за посиланням працює одразу.
   const direct = channelId(query)
@@ -146,7 +229,7 @@ function App() {
     <NavigationStack>
       <List navigationTitle="Графік світла">
         {cfg ? (
-          <Section title={`${regionById(cfg.region)?.name ?? ""}, черга ${cfg.group}`}>
+          <Section title={`${second ? `${cfg.name || FIRST_NAME}: ` : ""}${regionById(cfg.region)?.name ?? ""}, черга ${cfg.group}`}>
             <Text font={17} fontWeight="semibold">{loading ? "Оновлюю…" : view.title}</Text>
             <Text>{view.notice ? `${view.sub}. ${view.notice}` : view.sub}</Text>
             <Text foregroundStyle="secondaryLabel">
@@ -223,6 +306,45 @@ function App() {
             ))}
             {cfg.svitlobot ? <Button title="Прибрати датчик" role="destructive" action={() => removeSensor()} /> : null}
             <Link url={SVITLOBOT.howTo}>Як поставити свій датчик</Link>
+          </Section>
+        ) : null}
+
+        {cfg ? (
+          <Section title="Друга адреса">
+            {second ? (
+              <Text font={17} fontWeight="semibold">{loading ? "Оновлюю…" : `${second.place}: ${view2.title}`}</Text>
+            ) : (
+              <Text foregroundStyle="secondaryLabel">{SECOND_ABOUT}</Text>
+            )}
+            {second ? <Text>{view2.notice ? `${view2.sub}. ${view2.notice}` : view2.sub}</Text> : null}
+            {second ? <Text foregroundStyle="secondaryLabel">{daysLine(view2, true)}</Text> : null}
+            {second ? <Text foregroundStyle="secondaryLabel">{daysLine(view2, false)}</Text> : null}
+            {second && view2.fact ? <Text foregroundStyle="secondaryLabel">{view2.fact.full}</Text> : null}
+            <TextField title="Назва" prompt="Наприклад, Батьки" value={name2} onChanged={(value: string) => renameSecond(value)} />
+            <Picker title="Область" value={region2} onChanged={(value: string) => setRegion2(value)} pickerStyle="menu">
+              {REGIONS.map((r) => (
+                <Text tag={r.id}>{r.name}</Text>
+              ))}
+            </Picker>
+            {groups2.length ? (
+              <Picker
+                title="Черга"
+                value={cfg.second && cfg.second.region === region2 ? cfg.second.group : ""}
+                onChanged={(value: string) => {
+                  if (value) chooseSecondGroup(value)
+                }}
+                pickerStyle="menu"
+              >
+                {[<Text tag="">Оберіть</Text>].concat(groups2.map((g) => <Text tag={g}>{`Черга ${g}`}</Text>))}
+              </Picker>
+            ) : (
+              <Text foregroundStyle="secondaryLabel">{groups2Error ?? "Завантажую черги…"}</Text>
+            )}
+            {second ? (
+              <TextField title="Назва першої адреси" prompt={FIRST_NAME} value={cfg.name ?? ""} onChanged={(value: string) => renameFirst(value)} />
+            ) : null}
+            {second ? <Text foregroundStyle="secondaryLabel">{SECOND_WIDGET}</Text> : null}
+            {second ? <Button title="Прибрати другу адресу" role="destructive" action={() => removeSecond()} /> : null}
           </Section>
         ) : null}
 

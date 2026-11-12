@@ -100,8 +100,9 @@ function statusSymbol(kind: string): string {
 
 const timeColor = (c: Ctx) => (c.view.kind === "on" ? c.theme.text : c.theme.accent)
 
+// Коли адрес дві, замість «черга 3.2» назва адреси («Батьки»): так видно, який це віджет.
 function footerText(view: View): string {
-  return view.noticeShort || `черга ${view.group}`
+  return view.noticeShort || view.place || `черга ${view.group}`
 }
 
 function Footer({ c, size = 11 }: { c: Ctx; size?: number }) {
@@ -209,12 +210,16 @@ function DialText({ c, unit, withTimer, chip = null }: { c: Ctx; unit: number; w
   ) : withTimer && hasTimer(view, c.now) ? (
     <Timer c={c} size={12 * unit} color={theme.muted} align="center" />
   ) : (
-    <Label text={`черга ${view.group}`} size={11 * unit} weight="medium" color={theme.muted} align="center" />
+    <Label text={view.place || `черга ${view.group}`} size={11 * unit} weight="medium" color={theme.muted} align="center" />
   )
+  const place = view.place && (view.noticeShort || (withTimer && hasTimer(view, c.now))) ? (
+    <Label text={view.place} size={11 * unit} weight="semibold" color={theme.accent} align="center" />
+  ) : null
   const below = chip ? <VStack spacing={0} padding={{ top: 3 }}>{chip}</VStack> : null
   if (view.changeMin === null) {
     return (
       <VStack spacing={2}>
+        {place}
         <Label text={quietWords(view)} size={13 * unit} weight="semibold" color={theme.text} lines={2} align="center" />
         {footer}
         {below}
@@ -223,6 +228,7 @@ function DialText({ c, unit, withTimer, chip = null }: { c: Ctx; unit: number; w
   }
   return (
     <VStack spacing={0}>
+      {place}
       <Label text={changeVerb(view)} size={11 * unit} weight="medium" color={theme.muted} align="center" />
       <Label text={view.short} size={26 * unit} weight="bold" rounded color={timeColor(c)} />
       {footer}
@@ -295,6 +301,7 @@ function ChangeColumn({ c }: { c: Ctx }) {
       <Spacer minLength={3} />
       {tomorrowChip(c)}
       <HStack spacing={2}>
+        {view.place && view.fact ? <Footer c={c} /> : null}
         {view.fact ? <FactDot c={c} /> : <Footer c={c} />}
         <Spacer minLength={0} />
         <Refresh color={theme.muted} size={20} />
@@ -327,7 +334,14 @@ function Headline({ c }: { c: Ctx }) {
           <Refresh color={theme.muted} size={20} />
         </HStack>
         <HStack spacing={2}>
-          <Label text={view.noticeShort || view.sub} size={12} weight="medium" color={view.noticeShort ? theme.warn : theme.muted} lines={2} scale={0.8} />
+          <Label
+            text={view.noticeShort || (view.place ? `${view.place}: ${view.sub}` : view.sub)}
+            size={12}
+            weight="medium"
+            color={view.noticeShort ? theme.warn : theme.muted}
+            lines={2}
+            scale={0.8}
+          />
           {chip ? <Spacer minLength={2} /> : null}
           {chip}
         </HStack>
@@ -341,7 +355,7 @@ function Headline({ c }: { c: Ctx }) {
       <HStack spacing={2}>
         <Label text={changeVerb(view)} size={13} weight="medium" color={theme.muted} />
         <Spacer minLength={2} />
-        {chip && !view.noticeShort ? chip : <Footer c={c} />}
+        {chip && !view.noticeShort && !view.place ? chip : <Footer c={c} />}
         <FactDot c={c} />
         <Refresh color={theme.muted} size={20} />
       </HStack>
@@ -376,6 +390,7 @@ function SmallBattery({ c }: { c: Ctx }) {
       {view.changeMin !== null ? <Label text={`${changeVerb(view)} ${view.short}`} size={15} weight="semibold" color={theme.text} /> : null}
       {tomorrowChip(c)}
       <HStack spacing={4}>
+        {view.place && view.fact ? <Footer c={c} /> : null}
         {view.fact ? <FactLine c={c} compact /> : <Footer c={c} />}
         <Refresh color={theme.muted} size={20} />
       </HStack>
@@ -437,7 +452,7 @@ function Medium({ c, look }: { c: Ctx; look: string }) {
         <Status c={c} withTimer={look !== "battery"} />
         <Spacer minLength={6} />
         <HStack spacing={4}>
-          <Label text={list.heading} size={11} weight="semibold" color={theme.muted} />
+          <Label text={view.place ? `${view.place} · ${list.heading}` : list.heading} size={11} weight="semibold" color={theme.muted} />
           <Spacer minLength={0} />
           {tomorrowChip(c)}
         </HStack>
@@ -542,7 +557,7 @@ function MediumTomorrow({ c, look }: { c: Ctx; look: string }) {
           <Image systemName="calendar" font={14} fontWeight="semibold" foregroundStyle={theme.accent} />
           <Label text="Завтра" size={18} weight="bold" color={theme.text} />
         </HStack>
-        <Label text={dateWords(addDays(c.now.ymd, 1))} size={13} weight="medium" color={theme.text} />
+        <Label text={`${dateWords(addDays(c.now.ymd, 1))}${view.place ? ` · ${view.place}` : ""}`} size={13} weight="medium" color={theme.text} />
         <Spacer minLength={6} />
         <Label text={tomorrowSummary(view)} size={11} weight="semibold" color={theme.muted} />
         {windows.length ? <Label text={tomorrowHours(view, 4, ", ")} size={13} weight="medium" color={theme.text} lines={2} scale={0.75} /> : null}

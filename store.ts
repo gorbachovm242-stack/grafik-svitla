@@ -1,8 +1,8 @@
 // Налаштування, кеш графіка й завантаження з мережі. Сховище спільне для застосунку, віджета й кнопки «↻».
 import type { Channel, Config, Data, DayChoice, Fact, Now, Sched, Region } from "./logic"
 import {
-  SETTINGS, SVITLOBOT, channelId, fetchSchedule, findChannel, groupsFor, mergeFact, parseChannels, parseStatusPosts, postsFact,
-  queueFact, queueId,
+  SETTINGS, SVITLOBOT, addressesOf, channelId, fetchSchedule, findChannel, groupsFor, mergeFact, parseChannels, parseStatusPosts,
+  postsFact, queueFact, queueId,
 } from "./logic"
 
 const CONFIG_KEY = "config"
@@ -30,18 +30,23 @@ export function writeConfig(cfg: Config): void {
   Storage.set(CONFIG_KEY, cfg)
 }
 
-export function readCache(): Sched | null {
-  return Storage.get<Sched>(CACHE_KEY)
+// Друга адреса зберігає графік і датчик поруч із першою: «cache2», «fact2». Ключі першої ті самі, що й до неї.
+function slotKey(base: string, slot: number | undefined): string {
+  return slot ? `${base}${slot + 1}` : base
 }
 
-export function clearCache(): void {
-  Storage.remove(CACHE_KEY)
+export function readCache(slot = 0): Sched | null {
+  return Storage.get<Sched>(slotKey(CACHE_KEY, slot))
+}
+
+export function clearCache(slot = 0): void {
+  Storage.remove(slotKey(CACHE_KEY, slot))
 }
 
 // ---------- Збережене: що малювати без мережі ----------
 
 function cachedSched(cfg: Config): Sched | null {
-  const cached = readCache()
+  const cached = readCache(cfg.slot)
   return cached && cached.key === `${cfg.region}|${cfg.group}` ? cached : null
 }
 
@@ -58,7 +63,7 @@ export function cachedData(cfg: Config | null): Data {
 // Збережений стан датчика; інший канал чи інша черга: null.
 export function cachedFact(cfg: Config | null): Fact | null {
   if (!cfg) return null
-  const saved = Storage.get<Fact>(FACT_KEY)
+  const saved = Storage.get<Fact>(slotKey(FACT_KEY, cfg.slot))
   return saved && saved.channel.toLowerCase() === factIdOf(cfg).toLowerCase() ? saved : null
 }
 
@@ -67,10 +72,11 @@ export function cachedFact(cfg: Config | null): Fact | null {
 // Один запуск (віджет, кнопка «↻», сторінка) має спільний крайній строк для всіх своїх запитів.
 // Без інтернету iOS буває не відповідає на запит довше за його тайм-аут, а віджет тим часом зупиняють,
 // і він лишається старим. Тому чекаємо власними таймерами й самі скасовуємо запит.
-export type Net = { expired: boolean; requestMs: number; waiters: Set<() => void>; stop: () => void }
+// memo: дві адреси в одній області тягнуть ту саму сторінку обленерго й той самий список СвітлоБота лише раз.
+export type Net = { expired: boolean; requestMs: number; waiters: Set<() => void>; stop: () => void; memo: Map<string, Promise<string>> }
 
 export function startNet(budgetMs: number, requestMs: number = SETTINGS.timeoutSeconds * 1000): Net {
-  const net: Net = { expired: false, requestMs, waiters: new Set(), stop: () => {} }
+  const net: Net = { expired: false, requestMs, waiters: new Set(), stop: () => {}, memo: new Map() }
   const timer = setTimeout(() => {
     net.expired = true
     net.waiters.forEach((wake) => wake())
@@ -80,7 +86,17 @@ export function startNet(budgetMs: number, requestMs: number = SETTINGS.timeoutS
 }
 
 // Один запит із тайм-аутом. Помилка HTTP теж помилка, а не порожня сторінка.
-export async function loadText(url: string, net?: Net): Promise<string> {
+// В одному запуску та сама адреса вантажиться один раз, навіть для двох адрес користувача.
+export function loadText(url: string, net?: Net): Promise<string> {
+  if (!net) return loadOnce(url)
+  const same = net.memo.get(url)
+  if (same) return same
+  const loading = loadOnce(url, net)
+  net.memo.set(url, loading)
+  return loading
+}
+
+async function loadOnce(url: string, net?: Net): Promise<string> {
   if (net && net.expired) throw new Error("Час на мережу вичерпано")
   const ms = net ? net.requestMs : SETTINGS.timeoutSeconds * 1000
   const controller = typeof AbortController === "function" ? new AbortController() : null
@@ -144,7 +160,7 @@ export async function getSchedule(cfg: Config, now: Now, force: boolean, net?: N
   Storage.remove(OFFLINE_KEY)
   if (result.status === "ok") {
     const sched: Sched = Object.assign(result.sched, { key: `${cfg.region}|${cfg.group}`, fetchedAt: Date.now() })
-    Storage.set(CACHE_KEY, sched)
+    Storage.set(slotKey(CACHE_KEY, cfg.slot), sched)
     return { sched, status: "ok" }
   }
   return { sched: valid, status: result.status }
@@ -152,32 +168,51 @@ export async function getSchedule(cfg: Config, now: Now, force: boolean, net?: N
 
 export type Fresh = { data: Data; fact: Fact | null }
 
-// Віджет, кнопка «↻» і сторінка: графік і датчик паралельно, але не довше за budgetMs. Навіть якщо щось
+const EMPTY: Fresh = { data: { sched: null, status: "ok" }, fact: null }
+
+// Графік і датчик кожної адреси паралельно, зі спільним крайнім строком: не довше за budgetMs. Навіть якщо щось
 // не відпустить після скасування, за budgetMs із запасом буде збережене, і віджет намалюється.
-export async function freshData(cfg: Config | null, now: Now, force: boolean, budgetMs: number, requestMs: number): Promise<Fresh> {
-  if (!cfg) return { data: { sched: null, status: "ok" }, fact: null }
+async function freshList(list: Config[], now: Now, force: boolean, budgetMs: number, requestMs: number): Promise<Fresh[]> {
+  if (!list.length) return [EMPTY]
   const net = startNet(budgetMs, requestMs)
   let timer: number | undefined
-  const late = new Promise<Fresh>((resolve) => {
+  const late = new Promise<Fresh[]>((resolve) => {
     timer = setTimeout(() => {
       markOffline()
-      resolve({ data: { sched: cachedSched(cfg), status: "fail" }, fact: cachedFact(cfg) })
+      resolve(list.map((cfg) => ({ data: { sched: cachedSched(cfg), status: "fail" as const }, fact: cachedFact(cfg) })))
     }, budgetMs + 1500)
   })
   try {
-    const both = Promise.all([getSchedule(cfg, now, force, net), getFact(cfg, force, net)])
-    return await Promise.race([both.then(([data, fact]) => ({ data, fact })), late])
+    const all = Promise.all(
+      list.map((cfg) => Promise.all([getSchedule(cfg, now, force, net), getFact(cfg, force, net)]).then(([data, fact]) => ({ data, fact }))),
+    )
+    return await Promise.race([all, late])
   } finally {
     if (timer !== undefined) clearTimeout(timer)
     net.stop()
   }
 }
 
-// Дані для віджета. Щойно натиснули «Завтра ›» чи «‹ Сьогодні» (quick): лише збережене, без мережі, щоб день
-// перемикався одразу. Свіже підтягне планове оновлення.
-export function widgetData(cfg: Config | null, now: Now, quick: boolean): Promise<Fresh> {
-  if (quick) return Promise.resolve({ data: cachedData(cfg), fact: cachedFact(cfg) })
-  return freshData(cfg, now, false, SETTINGS.widgetBudgetMs, SETTINGS.widgetRequestMs)
+// Одна адреса (cfg уже з тією чергою, яку треба).
+export async function freshData(cfg: Config | null, now: Now, force: boolean, budgetMs: number, requestMs: number): Promise<Fresh> {
+  return cfg ? (await freshList([cfg], now, force, budgetMs, requestMs))[0] : EMPTY
+}
+
+// Усі адреси з налаштувань: [перша, друга]. Віджет і кнопка «↻» оновлюють обидві, бо сповіщення про обидві.
+export function freshAll(base: Config | null, now: Now, force: boolean, budgetMs: number, requestMs: number): Promise<Fresh[]> {
+  return freshList(addressesOf(base), now, force, budgetMs, requestMs)
+}
+
+// Дані для віджета по всіх адресах. Щойно натиснули «Завтра ›» чи «‹ Сьогодні» (quick): лише збережене,
+// без мережі, щоб день перемикався одразу. Свіже підтягне планове оновлення.
+export function widgetDataAll(base: Config | null, now: Now, quick: boolean): Promise<Fresh[]> {
+  const list = addressesOf(base)
+  if (quick) return Promise.resolve(list.length ? list.map((cfg) => ({ data: cachedData(cfg), fact: cachedFact(cfg) })) : [EMPTY])
+  return freshAll(base, now, false, SETTINGS.widgetBudgetMs, SETTINGS.widgetRequestMs)
+}
+
+export async function widgetData(cfg: Config | null, now: Now, quick: boolean): Promise<Fresh> {
+  return (await widgetDataAll(cfg, now, quick))[0]
 }
 
 export function loadGroups(region: Region): Promise<string[]> {
@@ -202,16 +237,16 @@ export async function getFact(cfg: Config | null, force: boolean, net?: Net): Pr
   if (!force && recentlyOffline()) return same
   if (own) return ownFact(cfg, own, same, nowMs, net)
   // У черзі датчиків не було: перепитуємо раз на годину, а не за кожним оновленням віджета.
-  const none = Storage.get<{ id: string; checkedAt: number }>(NONE_KEY)
+  const none = Storage.get<{ id: string; checkedAt: number }>(slotKey(NONE_KEY, cfg.slot))
   if (!force && !same && none && none.id === id && nowMs - none.checkedAt < 60 * 60000) return null
   try {
     const queue = queueFact(same, parseChannels(await loadText(SVITLOBOT.list, net)), cfg.region, cfg.group, nowMs)
     if (queue) {
-      Storage.set(FACT_KEY, queue)
-      Storage.remove(NONE_KEY)
+      Storage.set(slotKey(FACT_KEY, cfg.slot), queue)
+      Storage.remove(slotKey(NONE_KEY, cfg.slot))
     } else {
-      Storage.remove(FACT_KEY)
-      Storage.set(NONE_KEY, { id, checkedAt: nowMs })
+      Storage.remove(slotKey(FACT_KEY, cfg.slot))
+      Storage.set(slotKey(NONE_KEY, cfg.slot), { id, checkedAt: nowMs })
     }
     return queue
   } catch (e) {
@@ -225,7 +260,7 @@ async function ownFact(cfg: Config, id: string, same: Fact | null, nowMs: number
   try {
     const fromPosts = postsFact(parseStatusPosts(await loadText(SVITLOBOT.posts(id), net)), id, cfg.svitlobotName || id, nowMs)
     if (fromPosts) {
-      Storage.set(FACT_KEY, fromPosts)
+      Storage.set(slotKey(FACT_KEY, cfg.slot), fromPosts)
       return fromPosts
     }
   } catch (e) {
@@ -233,7 +268,7 @@ async function ownFact(cfg: Config, id: string, same: Fact | null, nowMs: number
   }
   try {
     const fact = mergeFact(same, findChannel(parseChannels(await loadText(SVITLOBOT.list, net)), id), id, nowMs)
-    Storage.set(FACT_KEY, fact)
+    Storage.set(slotKey(FACT_KEY, cfg.slot), fact)
     return fact
   } catch (e) {
     return same
