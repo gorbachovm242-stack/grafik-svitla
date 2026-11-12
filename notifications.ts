@@ -16,7 +16,9 @@ function queueKey(cfg: Config): string {
 async function syncPlanned(cfg: Config, sched: Sched | null, now: Now, date: Date): Promise<void> {
   const prefs = notifyPrefs(cfg)
   const items = sched ? plannedNotifications(sched, now, cfg.group, prefs) : []
-  const signature = `${queueKey(cfg)}#${items.map((item) => item.id).join("|")}`
+  // v2: тексти рахуються від моменту показу (12.11.2026). Нова позначка один раз переставляє вже заплановані
+  // попередження зі старими словами «завтра о …».
+  const signature = `v2|${queueKey(cfg)}#${items.map((item) => item.id).join("|")}`
   const saved = Storage.get<{ signature: string }>(PLANNED_KEY)
   if (saved && saved.signature === signature) return
   await Notification.removeAllPendingsOfCurrentScript()

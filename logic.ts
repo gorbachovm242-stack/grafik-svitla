@@ -727,19 +727,29 @@ function dayOfMinute(now: Now, min: number): string {
   return min >= 1440 ? addDays(now.ymd, 1) : now.ymd
 }
 
+// Коли станеться подія, словами від моменту, коли сповіщення ПОКАЖЕТЬСЯ (triggerMin), а не від моменту планування.
+// Попередження на завтра плануються звечора, а приходять уже завтра, тож «завтра о 14:30» там було б неправдою
+// (баг 12.11.2026). min і triggerMin на спільній осі двох діб: 0..1440 сьогодні, 1440..2880 завтра.
+export function noticeWhen(min: number, triggerMin: number): string {
+  const days = Math.floor(min / 1440) - Math.floor(triggerMin / 1440)
+  const t = min % 1440
+  if (days <= 0) return at(t)
+  return t === 0 ? "опівночі" : `завтра ${at(t)}`
+}
+
 export function plannedNotifications(sched: Sched, now: Now, group: string, prefs: { off: boolean; on: boolean }): Planned[] {
   const lead = SETTINGS.noticeMinutes
   const items: Planned[] = []
   for (const outage of outagesOf(sched, now)) {
     const startAt = outage.s - lead
     if (prefs.off && startAt > now.min) {
-      const until = outage.endKnown ? `, увімкнуть ${whenText(outage.e)}` : ""
+      const until = outage.endKnown ? `, увімкнуть ${noticeWhen(outage.e, startAt)}` : ""
       items.push({
         id: `off-${dayOfMinute(now, outage.s)}-${outage.s % 1440}`,
         kind: "off",
         triggerMin: startAt,
         title: outage.maybe ? `Через ${lead} хв можливе відключення` : `Через ${lead} хв вимкнуть світло`,
-        body: `Черга ${group}: ${outage.maybe ? "можливе відключення" : "відключення"} ${whenText(outage.s)}${until}`,
+        body: `Черга ${group}: ${outage.maybe ? "можливе відключення" : "відключення"} ${noticeWhen(outage.s, startAt)}${until}`,
       })
     }
     const endAt = outage.e - lead
@@ -749,7 +759,7 @@ export function plannedNotifications(sched: Sched, now: Now, group: string, pref
         kind: "on",
         triggerMin: endAt,
         title: `Через ${lead} хв увімкнуть світло`,
-        body: `Черга ${group}: світло ${whenText(outage.e)}`,
+        body: `Черга ${group}: світло ${noticeWhen(outage.e, endAt)}`,
       })
     }
   }
