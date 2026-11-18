@@ -8,7 +8,7 @@
 
 ## Що зберігається на телефоні
 
-Ваші налаштування: область, черга, вибрані сповіщення, вигляд віджета і, якщо ви його обрали, канал датчика СвітлоБота. Ще там лежить останній завантажений графік, щоб віджет працював без інтернету. Усе це лишається тільки на вашому телефоні й зникає, коли ви видаляєте застосунок.
+Ваші налаштування: область, черга, вибрані сповіщення, вигляд віджета, місце для тривог і, якщо ви їх обрали, канал датчика СвітлоБота й канал моніторингу тривог. Ще там лежить останній завантажений графік, щоб віджет працював без інтернету. Усе це лишається тільки на вашому телефоні й зникає, коли ви видаляєте застосунок.
 
 ## Куди застосунок звертається в мережі
 
@@ -24,6 +24,8 @@
 ## Повітряна тривога (Android)
 
 Дані про тривоги надає alerts.in.ua, і брати їх застосунку дозволено лише через власний сервер. Тому віджет звертається до сервера-посередника «Маяка» на Cloudflare Workers, а той до alerts.in.ua. Телефон отримує всі активні тривоги в Україні й сам обирає ваші, тож обране місце (область, район, громада) нікуди не надсилається. Посередник не веде журналів і нічого не зберігає про запити. Як і будь-який сервер, Cloudflare бачить IP-адресу телефона.
+
+Якщо ви підключили публічний Telegram-канал моніторингу, застосунок регулярно завантажує його публічну сторінку t.me/s/назва_каналу (поки екран увімкнено, раз на кілька хвилин) і показує останні дописи. Запит містить лише назву каналу; Telegram, як і будь-який сайт, бачить IP-адресу телефона.
 
 ## Сповіщення
 
@@ -45,4 +47,4 @@
 
 ## English summary
 
-Maiak (Android) and Grafik Svitla (iPhone), power outage schedule widgets, do not collect personal data, store it on servers or share it. There are no accounts, ads or analytics. Settings and the last downloaded schedule stay on the device only. The app downloads public outage schedules from the Zaporizhzhiaoblenergo website and open community data, and public sensor data from SvitloBot and its Telegram channels; these requests contain no personal data. The Android air raid alert widget gets alerts.in.ua data through the developer's proxy on Cloudflare Workers: the phone downloads all active alerts and picks yours locally, so your chosen location is never sent; the proxy keeps no logs. Contact: https://github.com/gorbachovm242-stack/grafik-svitla/issues
+Maiak (Android) and Grafik Svitla (iPhone), power outage schedule widgets, do not collect personal data, store it on servers or share it. There are no accounts, ads or analytics. Settings and the last downloaded schedule stay on the device only. The app downloads public outage schedules from the Zaporizhzhiaoblenergo website and open community data, and public sensor data from SvitloBot and its Telegram channels; these requests contain no personal data. The Android air raid alert widget gets alerts.in.ua data through the developer's proxy on Cloudflare Workers: the phone downloads all active alerts and picks yours locally, so your chosen location is never sent; the proxy keeps no logs. If you connect a public Telegram monitoring channel, the app regularly loads its public page (t.me/s/…) while the screen is on; the request contains only the channel name. Contact: https://github.com/gorbachovm242-stack/grafik-svitla/issues
