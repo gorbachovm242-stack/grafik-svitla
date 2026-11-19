@@ -204,14 +204,27 @@ function FactLine({ c, compact = false, size = 11, lock = false }: { c: Ctx; com
   )
 }
 
+// Ширина живого таймера: «59:59», «3:53:41» чи «12:00:00» (моноширинна цифра близько 0,62 кегля).
+// Без рамки таймер у рядку забирає всю ширину, і напис поруч обрізається (знімок з iPhone 19.11.2026).
+function timerWidth(c: Ctx, size: number): number {
+  const left = (c.view.changeMin ?? c.now.min) - c.now.min
+  const chars = left >= 600 ? 8 : left >= 60 ? 7 : 5
+  return Math.ceil(size * 0.62 * chars) + 2
+}
+
+// Чи показує заголовок стану живий таймер (рядок, у якому стоїть напис тривоги).
+const statusTimer = (c: Ctx, withTimer = true) => !c.view.notice && withTimer && hasTimer(c.view, c.now)
+
 // Напис біля значка тривоги на сторінці світла (середній і великий віджет), коли щось не так.
-// Довгий («Тривога з 10:40»), якщо поруч вистачає місця, інакше короткий («з 10:40»).
-function pillText(c: Ctx, room: number): string | null {
+// Довгий («Тривога з 10:40»), якщо поруч із таймером вистачає місця, інакше короткий («з 10:40»).
+// Напис ніколи не обрізається, тож ширину рахуємо з запасом (жирний 12 pt, близько 0,62 кегля на літеру).
+function pillText(c: Ctx, column: number, withTimer = true): string | null {
   const s = c.alert
   if (!s) return null
   const long = alertPill(s, false)
   if (!long) return null
-  const width = (text: string) => text.length * 12 * 0.55 + 18
+  const room = column - (statusTimer(c, withTimer) ? timerWidth(c, 13) + 6 : 0)
+  const width = (text: string) => text.length * 12 * 0.62 + 18
   return width(long) <= room ? long : alertPill(s, true)
 }
 
@@ -220,7 +233,7 @@ function Pill({ c, text }: { c: Ctx; text: string }) {
   const tok = s.kind === "setup" ? c.t.icons.stale : alertIcon(c.t, s.kind)
   return (
     <HStack spacing={0} padding={{ leading: 9, trailing: 9, top: 3, bottom: 3 }} background={{ style: tok.pillBg ?? tok.fill, shape: "capsule" }}>
-      <Label text={text} size={12} weight="bold" color={tok.pillText ?? tok.glyph} scale={0.75} />
+      <Label text={text} size={12} weight="bold" color={tok.pillText ?? tok.glyph} fixed />
     </HStack>
   )
 }
@@ -228,7 +241,7 @@ function Pill({ c, text }: { c: Ctx; text: string }) {
 // Заголовок стану світла, подробиці й таймер. pill: напис тривоги в рядку таймера (праворуч, біля стовпчика).
 function Status({ c, withTimer = true, pill = null }: { c: Ctx; withTimer?: boolean; pill?: VirtualNode | null }) {
   const { view, t } = c
-  const timer = !view.notice && withTimer && hasTimer(view, c.now)
+  const timer = statusTimer(c, withTimer)
   return (
     <VStack alignment="leading" spacing={1}>
       <HStack spacing={4}>
@@ -239,8 +252,8 @@ function Status({ c, withTimer = true, pill = null }: { c: Ctx; withTimer?: bool
       {view.notice ? <Label text={view.notice} size={12} weight="semibold" color={t.warn} /> : null}
       {timer || pill ? (
         <HStack spacing={4}>
-          {timer ? <Timer c={c} size={13} weight="medium" color={t.timer} /> : null}
-          <Spacer minLength={4} />
+          {timer ? <Timer c={c} size={13} weight="medium" color={t.timer} width={timerWidth(c, 13)} /> : null}
+          <Spacer minLength={2} />
           {pill}
         </HStack>
       ) : null}
@@ -428,8 +441,7 @@ function Rail({ c, small }: { c: Ctx; small: boolean }) {
 // Коли графіка немає, малюнку нічого показувати: лишаються слова. В «Маяку» «↻» унизу, подалі від значків.
 function TextOnly({ c, small = false }: { c: Ctx; small?: boolean }) {
   const rail = railOn(c)
-  const room = c.contentW - 40
-  const pill = rail && !small ? pillText(c, room) : null
+  const pill = rail && !small ? pillText(c, c.contentW - 20) : null
   return (
     <VStack alignment="leading" spacing={4} padding={{ top: 14, leading: 14, bottom: 12, trailing: rail ? 4 : 12 }} frame={{ ...fill, alignment: "topLeading" }}>
       <HStack spacing={4}>
@@ -673,8 +685,7 @@ function Medium({ c, look }: { c: Ctx; look: string }) {
     picture = <DayLook look={look} width={w} height={h} runs={view.todayRuns} nowMin={view.nowMin} paint={homePaint(look, t)} />
   }
   const column = c.contentW - (rail ? 24 : 36) - picW
-  const timerW = hasTimer(view, c.now) && look !== "battery" ? 13 * 0.62 * 7 + 8 : 0
-  const pill = rail ? pillText(c, column - timerW) : null
+  const pill = rail ? pillText(c, column, look !== "battery") : null
   return (
     <HStack spacing={rail ? 10 : 12} padding={{ top: 10, leading: 12, bottom: 10, trailing: rail ? 2 : 12 }} frame={fill}>
       {picture}
@@ -728,8 +739,7 @@ function Large({ c, look }: { c: Ctx; look: string }) {
   if (!c.view.todayRuns.length) return <TextOnly c={c} />
   const { view, t } = c
   const rail = railOn(c)
-  const timerW = hasTimer(view, c.now) && look !== "battery" ? 13 * 0.62 * 7 + 8 : 0
-  const pill = rail ? pillText(c, c.contentW - 20 - timerW) : null
+  const pill = rail ? pillText(c, c.contentW - 20, look !== "battery") : null
   return (
     <VStack alignment="leading" spacing={0} padding={{ top: 14, leading: 16, bottom: 12, trailing: rail ? 4 : 14 }} frame={{ ...fill, alignment: "topLeading" }}>
       <HStack spacing={4}>

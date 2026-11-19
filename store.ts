@@ -377,6 +377,12 @@ export async function freshAlerts(settings: AlertSettings, force: boolean, budge
   }
 }
 
+// Збережений список місць: сторінка показує вибір району й громади одразу, ще до мережі.
+export function cachedLocations(): Location[] | null {
+  const saved = Storage.get<{ at: number; list: Location[] }>(LOCATIONS_KEY)
+  return saved && Array.isArray(saved.list) && saved.list.length ? saved.list : null
+}
+
 // Області → райони → громади для вибору місця. Список оновлюємо раз на тиждень; без мережі — збережений,
 // а якщо його ще немає, то лише області.
 export async function loadLocations(force = false): Promise<Location[]> {
