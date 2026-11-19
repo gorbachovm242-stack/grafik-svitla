@@ -14,14 +14,12 @@ export const SETTINGS = {
   widgetBudgetMs: 8000, // скільки віджет чекає мережу: графік і датчик разом
   widgetRequestMs: 5000, // одне джерело у віджеті, щоб і на запасне лишився час
   buttonBudgetMs: 10000, // кнопка «↻»
+  pageBudgetMs: 4000, // дотик до значка тривоги: коротко оновити тривоги, перш ніж показати їхню сторінку
   appBudgetMs: 25000, // сторінка налаштувань
   offlineRetryMinutes: 5, // після невдалої спроби віджет стільки не йде в мережу, а одразу малює збережене
   factCacheMinutes: 4, // датчик СвітлоБота не перепитувати частіше
   factRefreshMinutes: 15, // з датчиком віджет просить оновлення частіше
   factStaleMinutes: 60, // старіші дані датчика позначаємо часом перевірки
-  // Кнопка «Завтра ›» у малому й середньому віджеті: скільки показувати завтра, перш ніж віджет сам повернеться на сьогодні.
-  tomorrowHoldMinutes: 3,
-  dayTapQuickSeconds: 20, // одразу після натискання «Завтра ›» чи «‹ Сьогодні» віджет малює збережене, без мережі
 }
 
 export const URLS = {
@@ -602,38 +600,49 @@ export function queueLabel(group: string, place?: string | null): string {
   return place ? `${place}, черга ${group}` : `Черга ${group}`
 }
 
-// ---------- Сьогодні чи завтра ----------
-// Малий і середній віджет кнопкою «Завтра ›» показують графік на завтра. Вибір зберігається разом із часом натискання.
+// ---------- Завтра ----------
+// Окремої сторінки чи кнопки «Завтра» немає (так само, як у «Маяку» для Android): щойно графік на завтра
+// опубліковано, його видно поруч із сьогоднішнім. Середній віджет — рядками «Сьогодні …» і «Завтра …»,
+// малий — «завтра» і перше відключення («06:00–09:00 +1»), великий — обидва дні поруч.
 
-export type DayChoice = { tomorrow: boolean; at: number; ymd: string }
-export type DayMode = { tomorrow: boolean; until: number | null; quick: boolean }
-
-// Завтра показуємо лише того самого дня й не довше за SETTINGS.tomorrowHoldMinutes: опівночі «завтра» стає «сьогодні»,
-// а забутий перемикач не ховає поточний стан надовго. quick: натискання щойно було, тож малюємо без мережі.
-export function dayMode(choice: DayChoice | null, now: Now, nowMs: number): DayMode {
-  if (!choice || typeof choice.at !== "number") return { tomorrow: false, until: null, quick: false }
-  const age = nowMs - choice.at
-  const quick = age >= 0 && age < SETTINGS.dayTapQuickSeconds * 1000
-  const until = choice.at + SETTINGS.tomorrowHoldMinutes * 60000
-  const tomorrow = choice.tomorrow === true && choice.ymd === now.ymd && age >= 0 && nowMs < until
-  return { tomorrow, until: tomorrow ? until : null, quick }
-}
-
-// Графік на завтра вже опубліковано: тоді й зʼявляється «Завтра ›».
+// Графік на завтра вже опубліковано.
 export function hasTomorrow(view: View): boolean {
   return view.tomorrowRuns !== null
 }
 
-// Завтра показують лише малий і середній віджет: великий і так має обидва дні, а на екрані блокування кнопок немає.
-export function tomorrowShown(mode: DayMode, view: View, family: string): boolean {
-  return mode.tomorrow && hasTomorrow(view) && (family === "systemSmall" || family === "systemMedium")
+// Коротко для вузької колонки: «12–14, 18–20:30» (рівні години без «:00»).
+export function compactWindowText(w: Run): string {
+  const short = (min: number) => (min % 60 ? hm(min) : pad(Math.floor(min / 60)))
+  return `${short(w.s)}–${short(w.e)}${w.st === "maybe" ? "?" : ""}`
 }
 
-// Коли перемалювати віджет: як завжди, а коли показано завтра, ще й щойно мине SETTINGS.tomorrowHoldMinutes,
-// щоб віджет сам повернувся на сьогодні.
-export function widgetReloadDate(view: View, now: Now, date: Date, mode: DayMode, tomorrow: boolean): Date {
-  const next = refreshDate(view, now, date).getTime()
-  return new Date(tomorrow && mode.until !== null ? Math.min(next, mode.until + 1000) : next)
+function joinWindows(windows: Run[], compact: boolean): string {
+  return windows.slice(0, 4).map(compact ? compactWindowText : windowText).join(", ")
+}
+
+// Що лишилося сьогодні: «12:00–14:00, 18:00–20:30», «більше немає» чи «без відключень».
+export function todayRow(view: View, compact = false): string {
+  if (!view.windowsLeft.length) return view.todayWindows.length ? "більше немає" : "без відключень"
+  return joinWindows(view.windowsLeft, compact)
+}
+
+export function tomorrowRow(view: View, compact = false): string {
+  return view.tomorrowWindows && view.tomorrowWindows.length ? joinWindows(view.tomorrowWindows, compact) : "без відключень"
+}
+
+// Коротко про завтра для малого віджета: перше відключення й скільки ще («06:00–09:00 +1») або «без відключень».
+export function tomorrowFirst(view: View): string | null {
+  if (!hasTomorrow(view)) return null
+  const windows = view.tomorrowWindows || []
+  if (!windows.length) return "без відключень"
+  return windowText(windows[0]) + (windows.length > 1 ? ` +${windows.length - 1}` : "")
+}
+
+// «19:30 завтра» — одне ціле: нерозривний пробіл, щоб «завтра» не перенеслося на рядок саме.
+const NBSP = String.fromCharCode(0xa0)
+
+export function keepTogether(text: string): string {
+  return text.replace(/(\d{1,2}:\d{2}) завтра/g, `$1${NBSP}завтра`)
 }
 
 // «1 відключення», «3 відключення», «5 відключень».
@@ -661,9 +670,11 @@ export function dateWords(ymd: string): string {
 }
 
 // Коли iOS варто знову намалювати віджет: за 10 секунд після зміни стану, а між змінами раз на 30 хвилин
-// (з датчиком СвітлоБота раз на 15, щоб фактичний стан не відставав).
-export function refreshDate(view: View, now: Now, date: Date): Date {
-  const minutes = view.fact ? SETTINGS.factRefreshMinutes : SETTINGS.refreshMinutes
+// (з датчиком СвітлоБота раз на 15, щоб фактичний стан не відставав; з тривогами ще частіше, alertMinutes).
+// iOS має денний ліміт оновлень і сама вирішує, коли саме оновити, тож це найраніший час, а не обіцянка.
+export function refreshDate(view: View, now: Now, date: Date, alertMinutes: number | null = null): Date {
+  let minutes = view.fact ? SETTINGS.factRefreshMinutes : SETTINGS.refreshMinutes
+  if (alertMinutes !== null) minutes = Math.min(minutes, alertMinutes)
   const latest = date.getTime() + minutes * 60000
   if (view.changeMin === null) return new Date(latest)
   return new Date(Math.min(latest, changeDate(view, now, date).getTime() + 10000))

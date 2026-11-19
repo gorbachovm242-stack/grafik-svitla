@@ -1,24 +1,36 @@
-// Налаштування, кеш графіка й завантаження з мережі. Сховище спільне для застосунку, віджета й кнопки «↻».
-import type { Channel, Config, Data, DayChoice, Fact, Now, Sched, Region } from "./logic"
+// Налаштування, кеш графіка й тривог і завантаження з мережі. Сховище спільне для застосунку, віджета й кнопок у віджеті.
+import type { Channel, Config, Data, Fact, Now, Sched, Region } from "./logic"
 import {
   SETTINGS, SVITLOBOT, addressesOf, channelId, fetchSchedule, findChannel, groupsFor, mergeFact, parseChannels, parseStatusPosts,
   postsFact, queueFact, queueId,
 } from "./logic"
+import type { AlertFeed, AlertSettings, AlertStatus, ChannelPost, Location, PageChoice } from "./alerts"
+import {
+  ALERTS, alertStatus, busy, channelUrl, cleanPlace, defaultOblasts, parseAlertFeed, parseChannelPosts, parseChannelTitle,
+  parseLocations, withPosts,
+} from "./alerts"
 
 const CONFIG_KEY = "config"
 const CACHE_KEY = "cache"
 const FACT_KEY = "fact"
 const NONE_KEY = "factNone"
 const OFFLINE_KEY = "offline"
-const DAY_KEY = "day"
+const ALERTS_KEY = "alerts" // налаштування модуля тривоги
+const ALERT_FEED_KEY = "alertFeed"
+const ALERT_CHANNEL_KEY = "alertChannel"
+const LOCATIONS_KEY = "alertLocations"
+const PAGE_KEY = "page"
 
-// Що показують малий і середній віджет: сьогодні чи завтра (кнопки «Завтра ›» і «‹ Сьогодні»).
-export function readDay(): DayChoice | null {
-  return Storage.get<DayChoice>(DAY_KEY)
+// Яку сторінку показує віджет (світло чи тривога): окремо для кожного розміру й поля Parameter.
+export function readPage(key: string): PageChoice | null {
+  const all = Storage.get<Record<string, PageChoice>>(PAGE_KEY)
+  return all && all[key] ? all[key] : null
 }
 
-export function writeDay(tomorrow: boolean, now: Now, nowMs: number = Date.now()): void {
-  Storage.set(DAY_KEY, { tomorrow, at: nowMs, ymd: now.ymd })
+export function writePage(key: string, page: string, nowMs: number = Date.now()): void {
+  const all = Storage.get<Record<string, PageChoice>>(PAGE_KEY) || {}
+  all[key] = { page, at: nowMs }
+  Storage.set(PAGE_KEY, all)
 }
 
 export function readConfig(): Config | null {
@@ -203,8 +215,8 @@ export function freshAll(base: Config | null, now: Now, force: boolean, budgetMs
   return freshList(addressesOf(base), now, force, budgetMs, requestMs)
 }
 
-// Дані для віджета по всіх адресах. Щойно натиснули «Завтра ›» чи «‹ Сьогодні» (quick): лише збережене,
-// без мережі, щоб день перемикався одразу. Свіже підтягне планове оновлення.
+// Дані для віджета по всіх адресах. Щойно торкнулися значка в стовпчику (quick): лише збережене,
+// без мережі, щоб сторінка перемикалася одразу. Свіже підтягне планове оновлення.
 export function widgetDataAll(base: Config | null, now: Now, quick: boolean): Promise<Fresh[]> {
   const list = addressesOf(base)
   if (quick) return Promise.resolve(list.length ? list.map((cfg) => ({ data: cachedData(cfg), fact: cachedFact(cfg) })) : [EMPTY])
@@ -252,6 +264,135 @@ export async function getFact(cfg: Config | null, force: boolean, net?: Net): Pr
   } catch (e) {
     return same
   }
+}
+
+// ---------- Повітряна тривога ----------
+
+export function readAlerts(): AlertSettings {
+  return Storage.get<AlertSettings>(ALERTS_KEY) || {}
+}
+
+export function writeAlerts(settings: AlertSettings): void {
+  Storage.set(ALERTS_KEY, settings)
+}
+
+type SavedFeed = { at: number; feed: AlertFeed }
+type SavedChannel = { id: string; at: number; posts: ChannelPost[]; title: string | null }
+
+function savedFeed(): SavedFeed | null {
+  const saved = Storage.get<SavedFeed>(ALERT_FEED_KEY)
+  return saved && saved.feed && Array.isArray(saved.feed.alerts) ? saved : null
+}
+
+function savedChannel(id: string): SavedChannel | null {
+  const saved = Storage.get<SavedChannel>(ALERT_CHANNEL_KEY)
+  return saved && saved.id === id && Array.isArray(saved.posts) ? saved : null
+}
+
+// Усі активні тривоги України (близько 1–2 КБ). Повторний запит протягом ALERTS.cacheSeconds не йде в мережу.
+export async function getAlertFeed(force: boolean, net?: Net): Promise<AlertFeed | null> {
+  const saved = savedFeed()
+  const nowMs = Date.now()
+  if (!force && saved && nowMs - saved.at >= 0 && nowMs - saved.at < ALERTS.cacheSeconds * 1000) return saved.feed
+  if (!force && recentlyOffline()) return saved ? saved.feed : null
+  try {
+    const feed = parseAlertFeed(await loadText(ALERTS.feed, net))
+    if (feed.ok) {
+      Storage.set(ALERT_FEED_KEY, { at: nowMs, feed })
+      return feed
+    }
+  } catch (e) {
+    // нижче збережене
+  }
+  return saved ? saved.feed : null
+}
+
+// Публічний канал моніторингу: дописи й назва. maxAgeSeconds: коли щось відбувається, частіше.
+export async function getChannelPosts(id: string, maxAgeSeconds: number, force: boolean, net?: Net): Promise<SavedChannel | null> {
+  const saved = savedChannel(id)
+  const nowMs = Date.now()
+  if (!force && saved && nowMs - saved.at >= 0 && nowMs - saved.at < maxAgeSeconds * 1000) return saved
+  if (!force && recentlyOffline()) return saved
+  try {
+    const html = await loadText(channelUrl(id), net)
+    const fresh: SavedChannel = { id, at: nowMs, posts: parseChannelPosts(html), title: parseChannelTitle(html) || (saved ? saved.title : null) }
+    Storage.set(ALERT_CHANNEL_KEY, fresh)
+    return fresh
+  } catch (e) {
+    return saved
+  }
+}
+
+// Канал для налаштувань: чи він є й публічний. Закритий канал чи помилка в назві: null.
+export async function checkChannel(id: string): Promise<SavedChannel | null> {
+  const html = await loadText(channelUrl(id))
+  const title = parseChannelTitle(html)
+  if (!title || !/tgme_channel_info|tgme_widget_message/.test(html)) return null
+  const fresh: SavedChannel = { id, at: Date.now(), posts: parseChannelPosts(html), title }
+  Storage.set(ALERT_CHANNEL_KEY, fresh)
+  return fresh
+}
+
+export type AlertBundle = { status: AlertStatus; posts: ChannelPost[] }
+
+// Стан тривоги зі збереженого, без мережі.
+export function cachedAlerts(settings: AlertSettings, nowMs: number = Date.now()): AlertBundle | null {
+  if (!settings.enabled) return null
+  const feed = savedFeed()
+  const status = alertStatus(settings.place, feed ? feed.feed : null, nowMs)
+  const channel = settings.channel ? savedChannel(settings.channel) : null
+  const posts = channel ? channel.posts : []
+  return { status: withPosts(status, posts, channel ? channel.title : null, nowMs), posts }
+}
+
+async function loadAlerts(settings: AlertSettings, force: boolean, net: Net): Promise<AlertBundle> {
+  const before = cachedAlerts(settings) as AlertBundle
+  const feed = await getAlertFeed(force, net)
+  const nowMs = Date.now()
+  const status = alertStatus(settings.place, feed, nowMs)
+  if (!settings.channel || status.kind === "setup") return { status, posts: [] }
+  // Канал частіше, коли щось відбувається (за щойно отриманим станом і збереженими дописами).
+  const maxAge = busy(status, before.posts, nowMs) ? ALERTS.channelBusySeconds : ALERTS.channelQuietSeconds
+  const channel = await getChannelPosts(settings.channel, maxAge, force, net)
+  const posts = channel ? channel.posts : []
+  return { status: withPosts(status, posts, channel ? channel.title : null, Date.now()), posts }
+}
+
+// Тривоги з мережі не довше за budgetMs (як і графік): без інтернету — збережене. Модуль вимкнено: null.
+export async function freshAlerts(settings: AlertSettings, force: boolean, budgetMs: number, requestMs: number): Promise<AlertBundle | null> {
+  if (!settings.enabled) return null
+  if (!cleanPlace(settings.place)) return cachedAlerts(settings)
+  const net = startNet(budgetMs, requestMs)
+  let timer: number | undefined
+  const late = new Promise<AlertBundle | null>((resolve) => {
+    timer = setTimeout(() => resolve(cachedAlerts(settings)), budgetMs + 1500)
+  })
+  try {
+    return await Promise.race([loadAlerts(settings, force, net), late])
+  } catch (e) {
+    return cachedAlerts(settings)
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+    net.stop()
+  }
+}
+
+// Області → райони → громади для вибору місця. Список оновлюємо раз на тиждень; без мережі — збережений,
+// а якщо його ще немає, то лише області.
+export async function loadLocations(force = false): Promise<Location[]> {
+  const saved = Storage.get<{ at: number; list: Location[] }>(LOCATIONS_KEY)
+  const valid = saved && Array.isArray(saved.list) && saved.list.length ? saved : null
+  if (!force && valid && Date.now() - valid.at < ALERTS.locationsDays * 86400000) return valid.list
+  try {
+    const list = parseLocations(await loadText(ALERTS.locations))
+    if (list.length) {
+      Storage.set(LOCATIONS_KEY, { at: Date.now(), list })
+      return list
+    }
+  } catch (e) {
+    // нижче збережене
+  }
+  return valid ? valid.list : defaultOblasts()
 }
 
 // Власний канал: спершу його дописи в Telegram (працює одразу, без модерації СвітлоБота й з точною тривалістю),

@@ -1,32 +1,31 @@
 // Пʼять виглядів: будинок, плитки, гірлянда, батарея, кільце. Кожна клітинка, вікно чи лампочка
 // це одна година; частину години зафарбовано точно за графіком. Розміри в точках екрана.
 import { ZStack, RoundedRectangle, Circle, PathShape, Text, Path2D } from "scripting"
-import type { Color, ShapeStyle, VirtualNode } from "scripting"
+import type { Color, VirtualNode } from "scripting"
 import type { Part, Run, View } from "./logic"
 import { batteryLevel, currentHour, hourParts, isCharging } from "./logic"
-import type { Cells, Paint } from "./theme"
+import type { Cells, Fill, Ink, Paint, RingColors } from "./theme"
+import { fade, gradient, opaque, radial, stopsGradient } from "./theme"
 
 export const HOUR_GUTTER = 16 // місце для підписів годин ліворуч
 
 const H = (x: number) => Math.round(x * 100) / 100
 
 // Частини години стоять поруч без накладання: на екрані блокування кольори прозорі.
-function partsFill(parts: Part[], colors: Cells): ShapeStyle {
+function partsFill(parts: Part[], colors: Cells): Fill {
   if (parts.length === 1) return colors[parts[0].st]
-  const stops: { color: Color; location: number }[] = []
+  const stops: { color: Ink; location: number }[] = []
   for (const part of parts) {
     const from = (part.from % 60) / 60
     const to = from + (part.to - part.from) / 60
     stops.push({ color: colors[part.st], location: H(from) }, { color: colors[part.st], location: H(to) })
   }
-  return { stops, startPoint: "leading", endPoint: "trailing" }
+  return stopsGradient(stops, "leading", "trailing")
 }
 
-function cellFill(parts: Part[], paint: Paint, vertical: boolean): ShapeStyle {
+function cellFill(parts: Part[], paint: Paint, vertical: boolean): Fill {
   if (parts.length === 1 && parts[0].st === "on" && !paint.lock) {
-    return vertical
-      ? { colors: [paint.lit[0], paint.lit[1]], startPoint: "top", endPoint: "bottom" }
-      : { colors: [paint.lit[0], paint.lit[1]], startPoint: "topLeading", endPoint: "bottomTrailing" }
+    return vertical ? gradient(paint.lit, "top", "bottom") : gradient(paint.lit, "topLeading", "bottomTrailing")
   }
   return partsFill(parts, paint.cells)
 }
@@ -35,7 +34,7 @@ const hasLight = (parts: Part[]) => parts.some((part) => part.st === "on")
 
 type Box = { x: number; y: number; w: number; h: number }
 
-function Cell({ box, radius, fill, glow, opacity }: { box: Box; radius: number; fill: ShapeStyle; glow?: Color | null; opacity?: number }) {
+function Cell({ box, radius, fill, glow, opacity }: { box: Box; radius: number; fill: Fill; glow?: Color | null; opacity?: number }) {
   return (
     <RoundedRectangle
       cornerRadius={H(radius)}
@@ -48,7 +47,7 @@ function Cell({ box, radius, fill, glow, opacity }: { box: Box; radius: number; 
   )
 }
 
-function Mark({ box, radius, color }: { box: Box; radius: number; color: Color }) {
+function Mark({ box, radius, color }: { box: Box; radius: number; color: Ink }) {
   return (
     <RoundedRectangle
       cornerRadius={H(radius + 1)}
@@ -59,7 +58,7 @@ function Mark({ box, radius, color }: { box: Box; radius: number; color: Color }
   )
 }
 
-function HourLabel({ hour, y, height, color }: { hour: number; y: number; height: number; color: Color }) {
+function HourLabel({ hour, y, height, color }: { hour: number; y: number; height: number; color: Ink }) {
   return (
     <Text
       font={9}
@@ -94,10 +93,8 @@ export function House({ width, height, runs, nowMin, paint }: DayProps) {
   const h = height - stair
   const items: (VirtualNode | null)[] = []
   if (paint.wall) {
-    items.push(<Cell box={{ x: x + w * 0.2, y: 0, w: w * 0.26, h: stair * 2 }} radius={2} fill={paint.roof as Color} />)
-    items.push(
-      <Cell box={{ x, y, w, h }} radius={5} fill={{ colors: [paint.wall[0], paint.wall[1]], startPoint: "top", endPoint: "bottom" }} />
-    )
+    items.push(<Cell box={{ x: x + w * 0.2, y: 0, w: w * 0.26, h: stair * 2 }} radius={2} fill={paint.roof as Ink} />)
+    items.push(<Cell box={{ x, y, w, h }} radius={5} fill={gradient(paint.wall, "top", "bottom")} />)
   } else {
     items.push(
       <RoundedRectangle
@@ -185,13 +182,11 @@ export function Garland({ width, height, runs, nowMin, paint }: DayProps) {
       if (paint.glow && hasLight(parts)) {
         const g = radius * 1.75
         items.push(
-          <Circle fill={{ color: paint.glow, opacity: 0.3 }} frame={{ width: H(g * 2), height: H(g * 2) }} offset={{ x: H(x - g), y: H(y - g) }} />
+          <Circle fill={fade(paint.glow, 0.3)} frame={{ width: H(g * 2), height: H(g * 2) }} offset={{ x: H(x - g), y: H(y - g) }} />
         )
       }
       const lit = parts.length === 1 && parts[0].st === "on" && !paint.lock
-      const fill: ShapeStyle = lit
-        ? { colors: [paint.lit[0], paint.lit[1]], center: "center", startRadius: 0, endRadius: H(radius) }
-        : partsFill(parts, paint.cells)
+      const fill: Fill = lit ? radial(paint.lit, H(radius)) : partsFill(parts, paint.cells)
       items.push(<Circle fill={fill} frame={{ width: H(radius * 2), height: H(radius * 2) }} offset={{ x: H(x - radius), y: H(y - radius) }} />)
       if (hour === current) {
         const around = radius + 1.6
@@ -246,7 +241,7 @@ export function Battery({ width, height, view, paint }: { width: number; height:
       <Cell
         box={{ x: inner.x, y: inner.y, w: fillWidth, h: inner.h }}
         radius={innerRadius}
-        fill={{ colors: [colors[0], colors[1]], startPoint: "top", endPoint: "bottom" }}
+        fill={gradient(colors, "top", "bottom")}
       />
     )
   }
@@ -266,10 +261,6 @@ export function Battery({ width, height, view, paint }: { width: number; height:
 // ---------- Кільце доби ----------
 // Північ угорі, час іде за годинниковою стрілкою, крапка показує, де ви зараз.
 
-export type RingColors = Cells & { now: Color; edge: Color }
-
-const opaque = (color: Color) => typeof color === "string" && color.startsWith("#")
-
 function ringPoint(size: number, radius: number, minutes: number) {
   const angle = (minutes / 1440) * 2 * Math.PI
   return { x: size / 2 + radius * Math.sin(angle), y: size / 2 - radius * Math.cos(angle) }
@@ -277,7 +268,7 @@ function ringPoint(size: number, radius: number, minutes: number) {
 
 export function Ring({
   size, lineWidth, runs, nowMin, colors, hoursColor,
-}: { size: number; lineWidth: number; runs: Run[]; nowMin: number | null; colors: RingColors; hoursColor?: Color | null }) {
+}: { size: number; lineWidth: number; runs: Run[]; nowMin: number | null; colors: RingColors; hoursColor?: Ink | null }) {
   const radius = size / 2 - lineWidth / 2 - 3
   const circumference = 2 * Math.PI * radius
   const list = runs.length ? runs : [{ s: 0, e: 1440, st: "unknown" as const }]

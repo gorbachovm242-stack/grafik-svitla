@@ -1,4 +1,4 @@
-// Сторінка налаштувань: черга, три сповіщення, вигляд і фон віджета. Зміни одразу видно у віджеті.
+// Сторінка налаштувань: черга, три сповіщення, повітряна тривога, вигляд і фон віджета. Зміни одразу видно у віджеті.
 import {
   Navigation, NavigationStack, List, Section, Text, TextField, Button, Picker, Toggle, Link, Script, Widget, useEffect, useState,
 } from "scripting"
@@ -9,9 +9,13 @@ import {
   DEFAULT_LOOK, FIRST_NAME, LOCK_LOOKS, LOOKS, REGIONS, SECOND_NAME, SETTINGS, SVITLOBOT, URLS, addressesOf, buildView, channelId, hm,
   kyivParts, lockLookOf, lookOf, notifyPrefs, regionById, searchChannels, windowText,
 } from "./logic"
-import { STYLES, styleOf } from "./theme"
+import type { AlertSettings, Location, Place } from "./alerts"
+import { ALERTS, active, alertShortTitle, channelName, cleanPlace, defaultOblasts, oblastForRegion } from "./alerts"
+import { STYLE_IDS, STYLE_NAMES, styleOf } from "./theme"
+import type { AlertBundle } from "./store"
 import {
-  cachedData, cachedFact, clearCache, freshAll, getFact, loadChannels, loadGroups, readConfig, writeConfig,
+  cachedAlerts, cachedData, cachedFact, checkChannel, clearCache, freshAlerts, freshAll, getFact, loadChannels, loadGroups, loadLocations,
+  readAlerts, readConfig, writeAlerts, writeConfig,
 } from "./store"
 import { forgetSecond, resetNotifications, tryUpdateNotifications } from "./notifications"
 
@@ -20,6 +24,9 @@ const HOW_TO_ADD =
   "Потім утримуйте віджет, «Змінити віджет», і в полі Script оберіть «Графік світла».\n\n" +
   "Екран блокування: утримуйте його, «Налаштувати» → «Екран блокування», торкніться поля віджетів і додайте Scripting. " +
   "Потім торкніться доданого віджета й оберіть «Графік світла»."
+const HOW_TO_ADD_ALERTS =
+  "\n\nКоли ввімкнено повітряну тривогу, праворуч у віджеті стовпчик значків: торкніться значка тривоги, щоб побачити її докладно, " +
+  "і значка світла, щоб повернутися. Кнопка «↻» оновлює все одразу."
 
 // Без власного датчика факт береться з усіх датчиків СвітлоБота вашої черги, нічого налаштовувати не треба.
 const QUEUE_HINT = "Точніше покаже датчик саме вашого будинку: знайдіть його за вулицею або вставте посилання на канал."
@@ -32,6 +39,24 @@ const SECOND_ABOUT = "Батьки, робота чи дача: віджет і 
 const SECOND_WIDGET =
   "Щоб віджет показував другу адресу: утримуйте віджет → «Змінити віджет» → у полі Parameter напишіть 2. " +
   "Попередження приходять про обидві адреси, з назвою на початку."
+
+const ALERTS_OFF =
+  "Увімкніть, і віджет покаже, чи є повітряна тривога у вашій громаді, з якого часу й що летить. " +
+  "Праворуч у віджеті зʼявиться стовпчик значків: світло й тривога."
+const ALERTS_ABOUT = "Оберіть свою громаду: у великих містах тривогу часто оголошують окремо від області."
+const CHANNEL_HINT =
+  "Публічний канал, де пишуть, що летить і куди. Віджет показує його останні дописи, не старші за годину, дослівно й з часом. " +
+  "Це неофіційні дані: канали помиляються й запізнюються. Закриті групи й канали не підходять."
+const ALERTS_LIMITS =
+  "Коли оновити віджет, iPhone вирішує сам: зазвичай раз на 15–30 хвилин, частіше, якщо ви часто на нього дивитеся. " +
+  "Кнопка «↻» у віджеті оновлює одразу. Сирени віджет не подасть: гучно сповіщає офіційний застосунок «Повітряна тривога», " +
+  "обовʼязково поставте його."
+const ALERTS_SOURCE =
+  "Дані про тривоги: alerts.in.ua (волонтерська «Мапа тривог») через сервер-посередник «Маяка». Телефон бере всі активні тривоги " +
+  "й сам обирає ваші: обране місце нікуди не надсилається."
+const STYLE_HINT =
+  "«Напівпрозорий» видно, коли в налаштуваннях віджета Scripting увімкнено прозорий фон (утримуйте віджет → «Змінити віджет»). " +
+  "«Як система» вдень світлий, а в темній темі iPhone нічний."
 
 function daysLine(view: View, today: boolean): string {
   if (today) return `Сьогодні: ${view.todayWindows.length ? view.todayWindows.map(windowText).join(", ") : "без відключень"}`
@@ -50,9 +75,14 @@ const PREVIEWS: [WidgetFamily, string][] = [
   ["accessoryRectangular", "Екран блокування"],
 ]
 
+function findLocation(list: Location[], uid: string | null | undefined): Location | null {
+  return uid ? list.find((l) => l.uid === uid) || null : null
+}
+
 function App() {
   const [cfg, setCfg] = useState<Config | null>(readConfig())
-  const [region, setRegion] = useState<string>(readConfig()?.region ?? "zaporizhzhia")
+  // Область не обрано, поки користувач не обере сам (раніше за замовчуванням стояло Запоріжжя).
+  const [region, setRegion] = useState<string>(readConfig()?.region ?? "")
   const [groups, setGroups] = useState<string[]>([])
   const [groupsError, setGroupsError] = useState<string | null>(null)
   // Збережене видно одразу, ще до мережі: без інтернету сторінка не порожня.
@@ -66,10 +96,17 @@ function App() {
   // Друга адреса.
   const [data2, setData2] = useState<Data>(cachedData(secondOf(readConfig())))
   const [fact2, setFact2] = useState<Fact | null>(cachedFact(secondOf(readConfig())))
-  const [region2, setRegion2] = useState<string>(readConfig()?.second?.region ?? readConfig()?.region ?? "zaporizhzhia")
+  const [region2, setRegion2] = useState<string>(readConfig()?.second?.region ?? readConfig()?.region ?? "")
   const [groups2, setGroups2] = useState<string[]>([])
   const [groups2Error, setGroups2Error] = useState<string | null>(null)
   const [name2, setName2] = useState<string>(readConfig()?.second?.name ?? "")
+  // Повітряна тривога.
+  const [alertSet, setAlertSet] = useState<AlertSettings>(readAlerts())
+  const [alertBundle, setAlertBundle] = useState<AlertBundle | null>(cachedAlerts(readAlerts()))
+  const [alertLoading, setAlertLoading] = useState(false)
+  const [locations, setLocations] = useState<Location[]>(defaultOblasts())
+  const [channelInput, setChannelInput] = useState("")
+  const [channelError, setChannelError] = useState<string | null>(null)
 
   async function refresh(next: Config | null, force: boolean) {
     if (!next) return
@@ -85,6 +122,21 @@ function App() {
     setFact2(all[1] ? all[1].fact : null)
     await tryUpdateNotifications(next, all.map((f) => f.data.sched), now, date, 4000)
     setLoading(false)
+    Widget.reloadAll()
+  }
+
+  async function refreshAlerts(next: AlertSettings, force: boolean) {
+    if (!next.enabled) return
+    setAlertLoading(true)
+    setAlertBundle(await freshAlerts(next, force, SETTINGS.appBudgetMs, SETTINGS.timeoutSeconds * 1000))
+    setAlertLoading(false)
+    Widget.reloadAll()
+  }
+
+  function saveAlerts(next: AlertSettings) {
+    writeAlerts(next)
+    setAlertSet(next)
+    setAlertBundle(cachedAlerts(next))
     Widget.reloadAll()
   }
 
@@ -121,11 +173,18 @@ function App() {
 
   useEffect(() => {
     refresh(cfg, true)
+    if (alertSet.enabled) {
+      loadLocations().then((list) => setLocations(list))
+      refreshAlerts(alertSet, true)
+    }
   }, [])
 
   useEffect(() => {
     const found = regionById(region)
-    if (!found) return
+    if (!found) {
+      setGroups([])
+      return
+    }
     setGroupsError(null)
     loadGroups(found)
       .then((list) => {
@@ -140,7 +199,10 @@ function App() {
 
   useEffect(() => {
     const found = regionById(region2)
-    if (!found) return
+    if (!found) {
+      setGroups2([])
+      return
+    }
     setGroups2Error(null)
     loadGroups(found)
       .then((list) => {
@@ -213,6 +275,58 @@ function App() {
     Widget.reloadAll()
   }
 
+  // ---------- Повітряна тривога ----------
+
+  // Перше ввімкнення: місце одразу стоїть на області світла, якщо її обрано.
+  function toggleAlerts(on: boolean) {
+    const next: AlertSettings = { ...alertSet, enabled: on }
+    if (on && !cleanPlace(next.place)) {
+      const uid = oblastForRegion(cfg?.region)
+      const oblast = findLocation(locations, uid) || findLocation(defaultOblasts(), uid)
+      next.place = oblast ? { oblast: oblast.uid, oblastTitle: oblast.title } : null
+    }
+    saveAlerts(next)
+    if (on) {
+      loadLocations().then((list) => setLocations(list))
+      refreshAlerts(next, true)
+    }
+  }
+
+  function choosePlace(place: Place | null) {
+    const next: AlertSettings = { ...alertSet, place }
+    saveAlerts(next)
+    refreshAlerts(next, false)
+  }
+
+  async function connectChannel() {
+    const id = channelName(channelInput)
+    if (!id) {
+      setChannelError("Вставте посилання на канал (t.me/назва) або @назва.")
+      return
+    }
+    setChannelError(null)
+    try {
+      const found = await checkChannel(id)
+      if (!found) {
+        setChannelError("Канал не знайдено або він закритий: підходять лише публічні канали.")
+        return
+      }
+      const next: AlertSettings = { ...alertSet, channel: id, channelTitle: found.title || id }
+      setChannelInput("")
+      saveAlerts(next)
+      refreshAlerts(next, false)
+    } catch (e) {
+      setChannelError("Не вдалося відкрити канал. Перевірте інтернет.")
+    }
+  }
+
+  function removeChannel() {
+    const next: AlertSettings = { ...alertSet }
+    delete next.channel
+    delete next.channelTitle
+    saveAlerts(next)
+  }
+
   const now = kyivParts(new Date())
   const view = buildView(cfg, { ...data, fact }, now)
   const second = secondOf(cfg)
@@ -224,20 +338,28 @@ function App() {
   const prefs = cfg ? notifyPrefs(cfg) : { change: true, off: true, on: true }
   const sameRegion = cfg && cfg.region === region
   const official = regionById(region)?.official
+  const alertStatus = alertSet.enabled && alertBundle ? alertBundle.status : null
+  const place = cleanPlace(alertSet.place)
+  const oblast = findLocation(locations, place?.oblast)
+  const raion = oblast ? findLocation(oblast.children, place?.raion) : null
 
   return (
     <NavigationStack>
       <List navigationTitle="Графік світла">
+        {alertStatus && active(alertStatus) ? (
+          <Section>
+            <Text font={17} fontWeight="semibold" foregroundStyle="systemRed">
+              {`${alertShortTitle(alertStatus)}${alertStatus.subShort ? ` ${alertStatus.subShort}` : ""}: ${alertStatus.place}`}
+            </Text>
+          </Section>
+        ) : null}
+
         {cfg ? (
           <Section title={`${second ? `${cfg.name || FIRST_NAME}: ` : ""}${regionById(cfg.region)?.name ?? ""}, черга ${cfg.group}`}>
             <Text font={17} fontWeight="semibold">{loading ? "Оновлюю…" : view.title}</Text>
             <Text>{view.notice ? `${view.sub}. ${view.notice}` : view.sub}</Text>
-            <Text foregroundStyle="secondaryLabel">
-              {`Сьогодні: ${view.todayWindows.length ? view.todayWindows.map(windowText).join(", ") : "без відключень"}`}
-            </Text>
-            <Text foregroundStyle="secondaryLabel">
-              {`Завтра: ${view.tomorrowRuns ? (view.tomorrowWindows || []).map(windowText).join(", ") || "без відключень" : "графіка ще немає"}`}
-            </Text>
+            <Text foregroundStyle="secondaryLabel">{daysLine(view, true)}</Text>
+            <Text foregroundStyle="secondaryLabel">{daysLine(view, false)}</Text>
             {view.checked !== null ? <Text foregroundStyle="secondaryLabel">{`Перевірено о ${hm(view.checked)}`}</Text> : null}
             <Button title="Оновити зараз" action={() => refresh(cfg, true)} />
           </Section>
@@ -249,11 +371,9 @@ function App() {
 
         <Section title="Черга">
           <Picker title="Область" value={region} onChanged={(value: string) => setRegion(value)} pickerStyle="menu">
-            {REGIONS.map((r) => (
-              <Text tag={r.id}>{r.name}</Text>
-            ))}
+            {[<Text tag="">Оберіть</Text>].concat(REGIONS.map((r) => <Text tag={r.id}>{r.name}</Text>))}
           </Picker>
-          {groups.length ? (
+          {!region ? null : groups.length ? (
             <Picker
               title="Черга"
               value={sameRegion && cfg ? cfg.group : ""}
@@ -309,6 +429,100 @@ function App() {
           </Section>
         ) : null}
 
+        <Section title="Повітряна тривога">
+          <Toggle title="Показувати у віджеті" value={!!alertSet.enabled} onChanged={(value: boolean) => toggleAlerts(value)} />
+          {alertStatus ? (
+            <Text font={17} fontWeight="semibold">{alertLoading ? "Оновлюю…" : alertStatus.title}</Text>
+          ) : (
+            <Text foregroundStyle="secondaryLabel">{ALERTS_OFF}</Text>
+          )}
+          {alertStatus && !alertLoading ? <Text>{alertStatus.sub}</Text> : null}
+          {alertStatus && alertStatus.where ? (
+            <Text foregroundStyle="secondaryLabel">{alertStatus.where === "уся область" ? "Оголошено на всю область" : `Оголошено: ${alertStatus.where}`}</Text>
+          ) : null}
+          {alertStatus ? alertStatus.posts.map((post) => <Text foregroundStyle="secondaryLabel">{post}</Text>) : null}
+          {alertStatus && alertStatus.checked ? (
+            <Text foregroundStyle="secondaryLabel">{`${alertStatus.stale ? "Дані за" : "Перевірено о"} ${alertStatus.checked}`}</Text>
+          ) : null}
+          {alertSet.enabled ? <Button title="Оновити тривоги" action={() => refreshAlerts(alertSet, true)} /> : null}
+        </Section>
+
+        {alertSet.enabled ? (
+          <Section title="Місце для тривог">
+            <Picker
+              title="Область"
+              value={place?.oblast ?? ""}
+              onChanged={(value: string) => {
+                const o = findLocation(locations, value)
+                choosePlace(o ? { oblast: o.uid, oblastTitle: o.title } : null)
+              }}
+              pickerStyle="menu"
+            >
+              {[<Text tag="">Оберіть</Text>].concat(locations.map((l) => <Text tag={l.uid}>{l.title}</Text>))}
+            </Picker>
+            {place && oblast && oblast.children.length ? (
+              <Picker
+                title="Район"
+                value={place.raion ?? ""}
+                onChanged={(value: string) => {
+                  const r = findLocation(oblast.children, value)
+                  choosePlace(r ? { oblast: oblast.uid, oblastTitle: oblast.title, raion: r.uid, raionTitle: r.title } : { oblast: oblast.uid, oblastTitle: oblast.title })
+                }}
+                pickerStyle="navigationLink"
+              >
+                {[<Text tag="">Уся область</Text>].concat(oblast.children.map((l) => <Text tag={l.uid}>{l.title}</Text>))}
+              </Picker>
+            ) : null}
+            {place && oblast && raion && raion.children.length ? (
+              <Picker
+                title="Громада"
+                value={place.hromada ?? ""}
+                onChanged={(value: string) => {
+                  const h = findLocation(raion.children, value)
+                  const base: Place = { oblast: oblast.uid, oblastTitle: oblast.title, raion: raion.uid, raionTitle: raion.title }
+                  choosePlace(h ? { ...base, hromada: h.uid, hromadaTitle: h.title } : base)
+                }}
+                pickerStyle="navigationLink"
+              >
+                {[<Text tag="">Увесь район</Text>].concat(raion.children.map((l) => <Text tag={l.uid}>{l.title}</Text>))}
+              </Picker>
+            ) : null}
+            <Text foregroundStyle="secondaryLabel">{ALERTS_ABOUT}</Text>
+          </Section>
+        ) : null}
+
+        {alertSet.enabled ? (
+          <Section title="Що летить: канал у Telegram">
+            {alertSet.channel ? (
+              <Text font={17} fontWeight="semibold">{alertSet.channelTitle || alertSet.channel}</Text>
+            ) : null}
+            <TextField
+              title="Канал"
+              prompt={alertSet.channel ? "Інший канал: t.me/назва або @назва" : "t.me/назва або @назва"}
+              value={channelInput}
+              onChanged={(value: string) => setChannelInput(value)}
+            />
+            {channelInput.trim() ? <Button title="Підключити канал" action={() => connectChannel()} /> : null}
+            {channelError ? <Text foregroundStyle="secondaryLabel">{channelError}</Text> : null}
+            {alertSet.channel ? <Button title="Прибрати канал" role="destructive" action={() => removeChannel()} /> : null}
+            <Text foregroundStyle="secondaryLabel">{CHANNEL_HINT}</Text>
+          </Section>
+        ) : null}
+
+        {alertSet.enabled ? (
+          <Section title="Миттєві сповіщення">
+            <Text foregroundStyle="secondaryLabel">{ALERTS_LIMITS}</Text>
+            <Link url={ALERTS.officialApp}>Офіційний застосунок «Повітряна тривога»</Link>
+          </Section>
+        ) : null}
+
+        {alertSet.enabled ? (
+          <Section title="Звідки дані про тривоги">
+            <Text foregroundStyle="secondaryLabel">{ALERTS_SOURCE}</Text>
+            <Link url={ALERTS.source}>Мапа тривог alerts.in.ua</Link>
+          </Section>
+        ) : null}
+
         {cfg ? (
           <Section title="Друга адреса">
             {second ? (
@@ -322,11 +536,9 @@ function App() {
             {second && view2.fact ? <Text foregroundStyle="secondaryLabel">{view2.fact.full}</Text> : null}
             <TextField title="Назва" prompt="Наприклад, Батьки" value={name2} onChanged={(value: string) => renameSecond(value)} />
             <Picker title="Область" value={region2} onChanged={(value: string) => setRegion2(value)} pickerStyle="menu">
-              {REGIONS.map((r) => (
-                <Text tag={r.id}>{r.name}</Text>
-              ))}
+              {[<Text tag="">Оберіть</Text>].concat(REGIONS.map((r) => <Text tag={r.id}>{r.name}</Text>))}
             </Picker>
-            {groups2.length ? (
+            {!region2 ? null : groups2.length ? (
               <Picker
                 title="Черга"
                 value={cfg.second && cfg.second.region === region2 ? cfg.second.group : ""}
@@ -374,10 +586,11 @@ function App() {
               ))}
             </Picker>
             <Picker title="Фон" value={styleOf(cfg.style)} onChanged={(value: string) => update({ style: value })} pickerStyle="menu">
-              {Object.keys(STYLES).map((id) => (
-                <Text tag={id}>{STYLES[id].name}</Text>
+              {STYLE_IDS.map((id) => (
+                <Text tag={id}>{STYLE_NAMES[id]}</Text>
               ))}
             </Picker>
+            <Text foregroundStyle="secondaryLabel">{STYLE_HINT}</Text>
           </Section>
         ) : null}
 
@@ -390,7 +603,7 @@ function App() {
         ) : null}
 
         <Section title="Як додати віджет">
-          <Text>{HOW_TO_ADD}</Text>
+          <Text>{HOW_TO_ADD + (alertSet.enabled ? HOW_TO_ADD_ALERTS : "")}</Text>
         </Section>
 
         {official ? (
